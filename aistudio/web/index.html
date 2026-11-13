@@ -238,6 +238,19 @@
       <h2 style="margin:0">My pictures</h2><span class="muted" id="galCount"></span>
       <div class="spacer"></div>
       <button class="btn small" onclick="post('/api/open-folder')">Open pictures folder</button>
+      <button class="btn small danger" id="clearBtn">Clear history</button>
+    </div>
+    <div id="clearBox" class="card hidden" style="margin-bottom:14px;border-color:#5b2330">
+      <h3>Clear all history?</h3>
+      <p class="muted" style="margin:4px 0 12px">This deletes for good (not to the Recycle Bin):<br>
+        • every picture the app made, and their prompts<br>
+        • the reference pictures you used<br>
+        • the saved "Things you DON'T want" text<br>
+        Your models, add-ons and settings stay.</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn danger" id="clearYes" style="border-color:#7f1d1d;background:#3b1219">Yes, delete everything</button>
+        <button class="btn" id="clearNo">Cancel</button>
+      </div>
     </div>
     <div id="gallery" class="grid"></div>
     <div id="galEmpty" class="empty hidden"><div class="big">🖼️</div>Nothing yet - go make something!</div>
@@ -667,6 +680,21 @@ document.addEventListener("paste", e => {
   const item = [...(e.clipboardData || {}).items || []].find(i => i.type.startsWith("image/"));
   if (item) { e.preventDefault(); showTab("create"); loadRef(item.getAsFile()); }
 });
+
+// ---------------------------------------------------------------- clear history
+$("#clearBtn").onclick = () => $("#clearBox").classList.toggle("hidden");
+$("#clearNo").onclick = () => $("#clearBox").classList.add("hidden");
+$("#clearYes").onclick = async () => {
+  try {
+    const r = await post("/api/clear-history");
+    $("#clearBox").classList.add("hidden");
+    $("#negative").value = ""; $("#prompt").value = ""; $("#seed").value = "";
+    $("#current").innerHTML = "";
+    clearRef();
+    loadGallery(); loadRecent();
+    toast(`History cleared: ${r.pictures} pictures and ${r.refs} reference pictures deleted.`, 5000);
+  } catch (e) { toast(e.message); }
+};
 
 // ---------------------------------------------------------------- loops
 setInterval(() => post("/api/ping").catch(() => {}), 5000);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from pathlib import Path
 
@@ -65,3 +66,33 @@ def delete(name: str) -> bool:
         except OSError:
             pass
     return True
+
+
+# names the app gives its pictures, e.g. 20261113-181452-353030877.png
+_OUR_NAME = re.compile(r"^\d{8}-\d{6}-\d+\.png$")
+
+
+def clear_all() -> int:
+    """Delete every picture the app made plus the list of prompts. Other files in the folder are left alone."""
+    removed = 0
+    with _lock:
+        pics = paths.pictures_dir()
+        names = set()
+        try:
+            for line in _index().read_text(encoding="utf-8").splitlines():
+                try:
+                    names.add(json.loads(line).get("file", ""))
+                except ValueError:
+                    pass
+        except OSError:
+            pass
+        names |= {f.name for f in pics.iterdir() if f.is_file() and _OUR_NAME.match(f.name)}
+        for name in names:
+            if safe_name(name) and (pics / name).is_file():
+                try:
+                    (pics / name).unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        _index().unlink(missing_ok=True)
+    return removed

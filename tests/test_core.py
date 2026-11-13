@@ -217,6 +217,26 @@ def test_server_reference_upload(server):
     assert engine_setup is not None
 
 
+def test_clear_history(server):
+    from aistudio import paths
+    pics = paths.pictures_dir()
+    (pics / "20261113-120000-42.png").write_bytes(b"x")
+    gallery.add({"file": "20261113-120000-42.png", "prompt": "secret prompt"})
+    (pics / "my-own-file.png").write_bytes(b"keep me")
+    refs = paths.data_dir() / "refs"
+    refs.mkdir(exist_ok=True)
+    (refs / "ref-abc.png").write_bytes(b"x")
+    settings.update(negative="secret negative")
+    code, d = _post(server + "/api/clear-history", {})
+    assert code == 200 and d["pictures"] >= 1 and d["refs"] >= 1
+    assert not (pics / "20261113-120000-42.png").exists()
+    assert (pics / "my-own-file.png").exists()          # not ours - left alone
+    assert not (pics / "gallery.jsonl").exists()
+    assert not list(refs.glob("ref-*.png"))
+    assert settings.load()["negative"] == ""
+    assert gallery.items() == []
+
+
 def test_server_image_path_traversal(server):
     with pytest.raises(urllib.error.HTTPError):
         _get(server + "/images/..%2F..%2Fsettings.json")

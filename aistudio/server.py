@@ -315,6 +315,23 @@ def make_handler(app: App):
                 if gen:
                     gen.cancel(str(body.get("id") or ""))
                 return self._json({"ok": True})
+            if route == "/api/clear-history":
+                gen = app._generator
+                if gen and gen.busy():
+                    return self._json({"error": "Wait until the pictures are finished."}, 400)
+                pictures = gallery.clear_all()
+                refs = 0
+                for f in (paths.data_dir() / "refs").glob("ref-*.png"):
+                    try:
+                        f.unlink()
+                        refs += 1
+                    except OSError:
+                        pass
+                settings.update(negative="")
+                if gen:
+                    gen.jobs.clear()
+                log.info("history cleared")
+                return self._json({"ok": True, "pictures": pictures, "refs": refs})
             if route == "/api/delete-image":
                 return self._json({"ok": gallery.delete(str(body.get("file") or ""))})
             if route == "/api/open-folder":
