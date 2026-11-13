@@ -139,6 +139,17 @@ jobs:
           $r = Get-Content ci-download-style.json -Raw | ConvertFrom-Json
           if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "add-on download failed: $($r.error)" }
 
+      - name: Download the Speed pack add-on (no console)
+        if: contains(github.event.head_commit.message, '[full-test]') || github.event_name == 'workflow_dispatch'
+        timeout-minutes: 10
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $p = Start-Process "$dir\python\pythonw.exe" -ArgumentList "-m","aistudio","--download-test","speed","$PWD\ci-download-speed.json" -WorkingDirectory "$dir\app" -PassThru
+          if (-not $p.WaitForExit(550000)) { Stop-Process $p -Force; throw "download took too long" }
+          Get-Content ci-download-speed.json
+          $r = Get-Content ci-download-speed.json -Raw | ConvertFrom-Json
+          if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "speed pack download failed: $($r.error)" }
+
       - name: Real pictures with Juggernaut XL - normal, copy art style, remix (only when asked - slow, on the processor)
         if: contains(github.event.head_commit.message, '[full-test]') || github.event_name == 'workflow_dispatch'
         timeout-minutes: 40
@@ -150,9 +161,10 @@ jobs:
           & "$dir\python\python.exe" -c "from PIL import Image, ImageDraw; im=Image.new('RGB',(512,512),(250,240,200)); d=ImageDraw.Draw(im); [d.ellipse((40+i*30,40+i*20,300+i*20,300+i*25),outline=(20+i*20,60,200-i*15),width=9) for i in range(8)]; im.save(r'$ref')"
           $spec = @(
             @{ name = "normal"; prompt = "a red apple on a wooden table"; test_size = 512; test_steps = 2 },
-            @{ name = "style";  prompt = "a cat"; ref_file = $ref; ref_mode = "style"; ref_strength = 0.8; test_size = 512; test_steps = 2 },
+            @{ name = "turbo";  prompt = "a red apple on a wooden table"; quality = "turbo"; test_size = 512; test_steps = 2 },
+            @{ name = "style-turbo";  prompt = "a cat"; quality = "turbo"; ref_file = $ref; ref_mode = "style"; ref_strength = 0.8; test_size = 512; test_steps = 2 },
             @{ name = "remix";  prompt = "colorful circles, watercolor"; ref_file = $ref; ref_mode = "remix"; ref_strength = 0.7; test_size = 512; test_steps = 3 },
-            @{ name = "normal-after-style"; prompt = "a blue car"; test_size = 512; test_steps = 2 }
+            @{ name = "normal-after"; prompt = "a blue car"; test_size = 512; test_steps = 2 }
           ) | ConvertTo-Json
           Set-Content -Path ci-jobs.json -Value $spec -Encoding utf8
           Push-Location "$dir\app"

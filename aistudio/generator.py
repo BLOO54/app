@@ -91,6 +91,16 @@ def make_job_params(raw: dict) -> dict:
 
 
 class Generator:
+    """Draws pictures. Memory plan for the graphics card ("mode"):
+
+    - full:    everything on the graphics card (cards with 12 GB or more)
+    - split:   the big drawing part (UNet) + picture-finisher (VAE) stay on the card; the text readers
+               and style copier wait in normal memory and hop onto the card only for the moment they're
+               used (8-11 GB cards like the RTX 4060). Fast, and nothing big moves per picture.
+    - offload: everything waits in normal memory and moves on when needed (small cards / emergency)
+    - cpu:     no NVIDIA card
+    """
+
     def __init__(self):
         self.jobs: dict[str, Job] = {}
         self._q: queue.Queue[Job] = queue.Queue()
@@ -98,11 +108,15 @@ class Generator:
         self.pipe = None
         self.i2i = None             # "remix" version of the pipeline (shares the same model parts)
         self.ip_loaded = False      # style copier attached?
-        self.placed = None          # which pipeline is currently set up on the graphics card
+        self.loras: dict = {}       # name -> loaded
+        self.base_scheduler = None  # the model's own scheduler settings
         self.loaded_model: str | None = None
+        self.mode = "cpu"
         self.offload = False
         self.device = "cpu"
         self.gpu = ""
+        self.vram_gb = 0.0
+        self.light_vae = False
         self.last_used = time.time()
         threading.Thread(target=self._worker, daemon=True).start()
 
@@ -111,7 +125,6 @@ class Generator:
         job = Job(id=uuid.uuid4().hex[:12], params=params, count=params["count"], steps=params["steps"])
         with self._lock:
             self.jobs[job.id] = job
-            # forget old finished jobs
             for jid in [j.id for j in self.jobs.values()
                         if j.state in ("done", "error", "cancelled") and time.time() - j.created > 3600]:
                 self.jobs.pop(jid, None)
@@ -133,13 +146,13 @@ class Generator:
         with self._lock:
             self._unload()
 
-    # ------------------------------------------------------------ internals
+    # ------------------------------------------------------------ loading
     def _unload(self):
         if self.pipe is not None:
             self.pipe = None
             self.i2i = None
             self.ip_loaded = False
-            self.placed = None
+            self.loras = {}
             self.loaded_model = None
             try:
                 import gc
@@ -151,10 +164,12 @@ class Generator:
                 pass
 
     def _set_scheduler(self, pipe, kind: str):
-        from diffusers import DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler
-        cfg = pipe.scheduler.config
+        from diffusers import DDIMScheduler, DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler
+        cfg = self.base_scheduler or pipe.scheduler.config
         if kind == "euler_a":
             pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(cfg)
+        elif kind == "ddim_trailing":
+            pipe.scheduler = DDIMScheduler.from_config(cfg, timestep_spacing="trailing")
         else:
             pipe.scheduler = DPMSolverMultistepScheduler.from_config(
                 cfg, use_karras_sigmas=True, algorithm_type="dpmsolver++")
@@ -165,7 +180,7 @@ class Generator:
         import os
 
         import torch
-        from diffusers import StableDiffusionXLPipeline
+        from diffusers import AutoencoderKL, StableDiffusionXLPipeline
 
         cuda = torch.cuda.is_available()
         self.device = "cuda" if cuda else "cpu"
@@ -178,26 +193,51 @@ class Generator:
             kw["use_safetensors"] = True
         if fp16_files:
             kw["variant"] = "fp16"
+        # lighter picture-finisher from the Speed pack: works in half precision -> half the memory
+        self.light_vae = False
+        vae_dir = models.model_dir("speed") / "vae"
+        if models.is_ready("speed") and (vae_dir / "config.json").exists():
+            try:
+                kw["vae"] = AutoencoderKL.from_pretrained(str(vae_dir), torch_dtype=dtype)
+                self.light_vae = True
+            except Exception:
+                log.exception("couldn't load the light VAE - using the model's own")
         pipe = StableDiffusionXLPipeline.from_pretrained(source, **kw)
+        self.base_scheduler = dict(pipe.scheduler.config)
         self._set_scheduler(pipe, scheduler)
         pipe.set_progress_bar_config(disable=True)
-        self.offload = False
+
         if cuda:
             props = torch.cuda.get_device_properties(0)
-            vram_gb = props.total_memory / 1024**3
-            self.gpu = f"{props.name} ({vram_gb:.0f} GB)"
-            if force_offload or vram_gb < 11.5:
-                # 8 GB cards: keep only the part that's working on the graphics card
+            self.vram_gb = props.total_memory / 1024**3
+            free, _total = torch.cuda.mem_get_info()
+            log.info("graphics card: %s, %.1f GB total, %.1f GB free before loading",
+                     props.name, self.vram_gb, free / 1024**3)
+            if force_offload or self.vram_gb < 7.5:
+                self.mode = "offload"
+            elif self.vram_gb < 11.5:
+                self.mode = "split"
+            else:
+                self.mode = "full"
+            if self.mode == "offload":
                 pipe.enable_model_cpu_offload()
-                self.offload = True
+            elif self.mode == "split":
+                pipe.unet.to("cuda")
+                pipe.vae.to("cuda")
             else:
                 pipe.to("cuda")
+            self.gpu = f"{props.name} ({self.vram_gb:.0f} GB)"
         else:
+            self.mode = "cpu"
             self.gpu = "No NVIDIA graphics card - using the processor (slow)"
-        try:
-            pipe.enable_vae_slicing()
-        except Exception:
-            pass
+        self.offload = self.mode == "offload"
+        if self.mode in ("split", "offload"):
+            # finish the picture in tiles so it never runs out of graphics memory
+            try:
+                pipe.enable_vae_tiling()
+            except Exception:
+                pass
+        log.info("memory plan: %s, light finisher: %s", self.mode, self.light_vae)
         return pipe
 
     def _ensure_model(self, job: Job, force_offload=False):
@@ -210,64 +250,102 @@ class Generator:
         job.state, job.message = "loading", f"Loading {m.name} into your graphics card (takes ~30 s the first time)..."
         self._unload()
         info = models.ready_info(model_id)
+        t0 = time.time()
         self.pipe = self.load_pipeline(str(models.model_dir(model_id)), bool(info.get("fp16")),
                                        m.scheduler, force_offload=force_offload)
-        self.placed = self.pipe
         self.loaded_model = model_id
+        log.info("loaded %s in %.1fs", model_id, time.time() - t0)
 
-    # ------------------------------------------------------------ reference pictures
-    def _place(self, pipe):
-        """Put a pipeline on the graphics card (or set up low-memory mode for it)."""
-        if self.placed is pipe:
-            return
-        if self.device == "cuda":
-            if self.offload:
-                pipe.enable_model_cpu_offload()
-            else:
-                pipe.to("cuda")
-        self.placed = pipe
+    # ------------------------------------------------------------ moving small parts on/off the card
+    def _borrow(self, *modules):
+        """In 'split' mode, put small parts on the card for a moment. Returns a function that puts them back."""
+        mods = [m for m in modules if m is not None]
+        if self.mode != "split" or not mods:
+            return lambda: None
+        for m in mods:
+            m.to("cuda")
 
+        def give_back():
+            for m in mods:
+                m.to("cpu")
+        return give_back
+
+    def _exec_device(self, pipe):
+        try:
+            return pipe._execution_device
+        except Exception:
+            return self.device
+
+    def _encode_text(self, pipe, p) -> dict:
+        give_back = self._borrow(pipe.text_encoder, pipe.text_encoder_2)
+        try:
+            pe, npe, ppe, nppe = pipe.encode_prompt(
+                prompt=p["full_prompt"], device=self._exec_device(pipe), num_images_per_prompt=1,
+                do_classifier_free_guidance=p["guidance"] > 1, negative_prompt=p["negative"] or None)
+        finally:
+            give_back()
+        out = {"prompt_embeds": pe, "pooled_prompt_embeds": ppe}
+        if p["guidance"] > 1:
+            out.update(negative_prompt_embeds=npe, negative_pooled_prompt_embeds=nppe)
+        return out
+
+    def _encode_style(self, pipe, ref, p) -> list:
+        give_back = self._borrow(getattr(pipe, "image_encoder", None))
+        try:
+            return pipe.prepare_ip_adapter_image_embeds(
+                ip_adapter_image=ref, ip_adapter_image_embeds=None, device=self._exec_device(pipe),
+                num_images_per_prompt=1, do_classifier_free_guidance=p["guidance"] > 1)
+        finally:
+            give_back()
+
+    # ------------------------------------------------------------ add-ons
     def _set_style_copier(self, on: bool):
         if on == self.ip_loaded:
             return
         if on:
             if not models.is_ready("style"):
                 raise RuntimeError("Download the Style copier add-on first (Models tab).")
-            self.pipe.load_ip_adapter(str(models.model_dir("style")), subfolder="sdxl_models",
-                                      weight_name="ip-adapter_sdxl.safetensors")
+            if self.mode == "split":
+                # load while the big parts sit in normal memory, so the 1.8 GB style reader lands there too
+                self.pipe.unet.to("cpu")
+                self.pipe.vae.to("cpu")
+            try:
+                self.pipe.load_ip_adapter(str(models.model_dir("style")), subfolder="sdxl_models",
+                                          weight_name="ip-adapter_sdxl.safetensors")
+            finally:
+                if self.mode == "split":
+                    if getattr(self.pipe, "image_encoder", None) is not None:
+                        self.pipe.image_encoder.to("cpu")      # only hops on when used
+                    self.pipe.unet.to("cuda")
+                    self.pipe.vae.to("cuda")
+            if self.mode == "offload":
+                self.pipe.enable_model_cpu_offload()
         else:
             self.pipe.unload_ip_adapter()
+            if self.mode == "offload":
+                self.pipe.enable_model_cpu_offload()
         self.ip_loaded = on
-        self.placed = None      # parts changed - set up the graphics card again
         self.i2i = None
 
-    def _prepare(self, job: Job):
-        """Pick the right pipeline for this job. Returns (pipe, extra arguments)."""
-        p = job.params
-        mode = p.get("ref_mode")
-        if mode:
-            from PIL import Image, ImageOps
-            ref = Image.open(p["ref_path"]).convert("RGB")
-        if mode == "style":
-            job.message = "Getting the style copier ready..."
-            self._set_style_copier(True)
-            self._place(self.pipe)
-            # "InstantStyle": only the style layers look at the reference, so it copies the look, not the content
-            self.pipe.set_ip_adapter_scale({"up": {"block_0": [0.0, p["ref_strength"], 0.0]}})
-            return self.pipe, {"width": p["width"], "height": p["height"], "ip_adapter_image": ref}
-        self._set_style_copier(False)
-        if mode == "remix":
-            from diffusers import StableDiffusionXLImg2ImgPipeline
-            if self.i2i is None:
-                self.i2i = StableDiffusionXLImg2ImgPipeline.from_pipe(self.pipe)
-                self.i2i.set_progress_bar_config(disable=True)
-            self._place(self.i2i)
-            start = ImageOps.fit(ref, (p["width"], p["height"]), method=Image.LANCZOS)
-            job.steps = max(1, int(p["steps"] * p["ref_strength"]))
-            return self.i2i, {"image": start, "strength": p["ref_strength"]}
-        self._place(self.pipe)
-        return self.pipe, {"width": p["width"], "height": p["height"]}
+    def _set_loras(self, wanted: dict):
+        """wanted: {name: (file, strength)} - extra skills like Turbo. Empty = none."""
+        pipe = self.pipe
+        for name, (path, _w) in wanted.items():
+            if name not in self.loras:
+                from . import engine_setup
+                engine_setup.ensure_packages(["peft"])
+                pipe.load_lora_weights(str(path), adapter_name=name)
+                self.loras[name] = True
+                log.info("loaded extra skill %s", name)
+        if not self.loras:
+            return
+        if wanted:
+            pipe.enable_lora()
+            pipe.set_adapters(list(wanted), [w for _p, w in wanted.values()])
+        else:
+            pipe.disable_lora()
 
+    # ------------------------------------------------------------ jobs
     def _worker(self):
         while True:
             job = self._q.get()
@@ -297,11 +375,63 @@ class Generator:
             self._ensure_model(job, force_offload=True)
             self._draw_all(job)
 
+    def _prepare(self, job: Job):
+        """Pick the right pipeline + settings for this job. Returns (pipe, extra arguments)."""
+        p = job.params
+        mode = p.get("ref_mode")
+        ref = None
+        if mode:
+            from PIL import Image
+            ref = Image.open(p["ref_path"]).convert("RGB")
+
+        # Turbo (Speed pack) or normal
+        if p["quality"] == "turbo":
+            if not models.is_ready("speed"):
+                raise RuntimeError("Turbo needs the Speed pack add-on (Models tab).")
+            self._set_loras({"turbo": (models.model_dir("speed") / "Hyper-SDXL-8steps-CFG-lora.safetensors", 1.0)})
+        else:
+            self._set_loras({})
+
+        if mode == "style":
+            job.message = "Getting the style copier ready..."
+            self._set_style_copier(True)
+            # "InstantStyle": only the style layers look at the reference, so it copies the look, not the content
+            self.pipe.set_ip_adapter_scale({"up": {"block_0": [0.0, p["ref_strength"], 0.0]}})
+            pipe = self.pipe
+            extra = {"width": p["width"], "height": p["height"]}
+        else:
+            self._set_style_copier(False)
+            if mode == "remix":
+                from diffusers import StableDiffusionXLImg2ImgPipeline
+                from PIL import Image, ImageOps
+                if self.i2i is None:
+                    self.i2i = StableDiffusionXLImg2ImgPipeline.from_pipe(self.pipe)
+                    self.i2i.set_progress_bar_config(disable=True)
+                pipe = self.i2i
+                start = ImageOps.fit(ref, (p["width"], p["height"]), method=Image.LANCZOS)
+                job.steps = max(1, int(p["steps"] * p["ref_strength"]))
+                extra = {"image": start, "strength": p["ref_strength"]}
+            else:
+                pipe = self.pipe
+                extra = {"width": p["width"], "height": p["height"]}
+
+        sched = "ddim_trailing" if p["quality"] == "turbo" else models.get(p["model"]).scheduler
+        self._set_scheduler(pipe, sched)
+        if self.mode == "offload":
+            pipe.enable_model_cpu_offload()      # (re)attach the memory-saving hooks to this pipeline
+
+        job.message = "Reading your prompt..."
+        extra.update(self._encode_text(pipe, p))
+        if mode == "style":
+            extra["ip_adapter_image_embeds"] = self._encode_style(pipe, ref, p)
+        return pipe, extra
+
     def _draw_all(self, job: Job):
         import torch
         from PIL.PngImagePlugin import PngInfo
         p = job.params
         pipe, extra = self._prepare(job)
+        cuda = self.device == "cuda"
         job.state = "running"
         for i in range(p["count"]):
             if job.cancel:
@@ -309,20 +439,26 @@ class Generator:
             job.image_index, job.step = i, 0
             seed = (p["seed"] + i) % (2**31)
             job.message = f"Drawing picture {i + 1} of {p['count']}..."
+            marks = {}
 
-            def on_step(pipe, step, _t, kw):
+            def on_step(pipe_, step, _t, kw):
                 job.step = step + 1
+                marks["last_step"] = time.time()
                 if job.cancel:
-                    pipe._interrupt = True
+                    pipe_._interrupt = True
                 return kw
 
             gen = torch.Generator(device="cpu").manual_seed(seed)
+            if cuda:
+                torch.cuda.reset_peak_memory_stats()
             t0 = time.time()
-            out = pipe(prompt=p["full_prompt"], negative_prompt=p["negative"] or None,
-                       num_inference_steps=p["steps"], guidance_scale=p["guidance"], generator=gen,
-                       callback_on_step_end=on_step, **extra)
+            out = pipe(prompt=None, num_inference_steps=p["steps"], guidance_scale=p["guidance"],
+                       generator=gen, callback_on_step_end=on_step, **extra)
             if job.cancel:
                 break
+            took = time.time() - t0
+            drawing = marks.get("last_step", t0 + took) - t0
+            peak = torch.cuda.max_memory_allocated() / 1024**3 if cuda else 0
             img = out.images[0]
             name = time.strftime("%Y%m%d-%H%M%S") + f"-{seed}.png"
             meta = PngInfo()
@@ -330,16 +466,19 @@ class Generator:
                           f"{p['full_prompt']}\nNegative prompt: {p['negative']}\n"
                           f"Steps: {p['steps']}, CFG scale: {p['guidance']}, Seed: {seed}, "
                           f"Size: {p['width']}x{p['height']}, Model: {models.get(p['model']).name}"
-                          + (f", Reference: {p['ref_mode']} {p['ref_strength']}" if p.get("ref_mode") else ""))
+                          + (f", Reference: {p['ref_mode']} {p['ref_strength']}" if p.get("ref_mode") else "")
+                          + (", Turbo" if p["quality"] == "turbo" else ""))
             img.save(paths.pictures_dir() / name, pnginfo=meta)
             entry = {"file": name, "prompt": p["prompt"], "negative": p["user_negative"], "model": p["model"],
                      "style": p["style"], "aspect": p["aspect"], "quality": p["quality"], "seed": seed,
-                     "width": p["width"], "height": p["height"], "steps": p["steps"],
-                     "seconds": round(time.time() - t0, 1), "time": time.time(),
+                     "width": p["width"], "height": p["height"], "steps": job.steps,
+                     "seconds": round(took, 1), "time": time.time(),
                      "ref_mode": p.get("ref_mode"), "ref_strength": p.get("ref_strength")}
             gallery.add(entry)
             job.images.append(entry)
-            log.info("made %s in %.1fs", name, time.time() - t0)
+            log.info("made %s in %.1fs [%s, %s, %d steps: drawing %.1fs = %.2f steps/s, finishing %.1fs, "
+                     "peak %.1f GB, plan %s]", name, took, p["quality"], p.get("ref_mode") or "normal",
+                     job.steps, drawing, job.steps / max(drawing, 0.01), took - drawing, peak, self.mode)
         if job.cancel:
             job.state, job.message = "cancelled", "Stopped"
         else:

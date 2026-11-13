@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 TORCH_INDEX = {"cuda": "https://download.pytorch.org/whl/cu128",
                "cpu": "https://download.pytorch.org/whl/cpu"}
 EXTRA_PACKAGES = ["diffusers>=0.32", "transformers>=4.45", "accelerate>=1.0", "safetensors",
-                  "huggingface_hub>=0.26", "pillow"]
+                  "huggingface_hub>=0.26", "pillow", "peft>=0.12"]
 NEEDED_MODULES = ["torch", "diffusers", "transformers", "accelerate", "safetensors", "huggingface_hub", "PIL"]
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -57,6 +57,27 @@ def gpu_names() -> list[str]:
 def is_installed() -> bool:
     importlib.invalidate_caches()
     return all(importlib.util.find_spec(m) is not None for m in NEEDED_MODULES)
+
+
+_extra_lock = threading.Lock()
+
+
+def ensure_packages(packages: list[str]) -> None:
+    """Install small extra parts the engine didn't have yet (for people who installed an older version)."""
+    with _extra_lock:
+        importlib.invalidate_caches()
+        missing = [p for p in packages if importlib.util.find_spec(p.split(">")[0].split("=")[0]) is None]
+        if not missing:
+            return
+        log.info("installing extra engine parts: %s", missing)
+        cmd = [paths.python_exe(), "-m", "pip", "install", "--disable-pip-version-check",
+               "--no-warn-script-location", *missing]
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             creationflags=_NO_WINDOW, timeout=900)
+        if out.returncode != 0:
+            raise RuntimeError("Couldn't install an extra engine part (" + ", ".join(missing) + "). "
+                               "Check your internet and try again.\n" + (out.stdout or "")[-600:])
+        importlib.invalidate_caches()
 
 
 _RAW = re.compile(r"Progress (\d+) of (\d+)")

@@ -188,6 +188,11 @@
             <div class="count" id="count"></div>
           </label>
         </div>
+        <div id="turboNeed" class="note hidden">
+          <b>Turbo</b> needs the <b>Speed pack</b> add-on (one-time download, about 1.1 GB).
+          It also makes the other quality settings use less graphics memory.
+          <div style="margin-top:8px" id="turboNeedAct"></div>
+        </div>
         <details>
           <summary>More options</summary>
           <div style="display:flex;flex-direction:column;gap:12px">
@@ -373,7 +378,12 @@ async function refresh() {
   }
   const ready = S.engine.installed && S.models.some(m => m.ready);
   $("#verPill").textContent = "v" + S.app.version;
-  if (S.generator.gpu) { $("#gpuPill").textContent = S.generator.gpu + (S.generator.offload ? " · low-memory mode" : ""); $("#gpuPill").classList.remove("hidden"); }
+  if (S.generator.gpu) {
+    const plan = { split: " · smart memory", offload: " · memory saver", full: "", cpu: "" }[S.generator.mode] || "";
+    $("#gpuPill").textContent = S.generator.gpu + plan; $("#gpuPill").classList.remove("hidden");
+    $("#gpuPill").title = { split: "The main drawing part stays on your graphics card; small parts hop on only when needed. Normal for 8 GB cards.",
+                            offload: "Parts move between normal memory and the graphics card as needed. A bit slower but uses little graphics memory." }[S.generator.mode] || "";
+  }
   else if (S.engine.gpus && S.engine.gpus.length) { $("#gpuPill").textContent = S.engine.gpus[0]; $("#gpuPill").classList.remove("hidden"); }
   if (!filled) { fillControls(); filled = true; if (!ready) showTab("setup"); }
   renderSetup(); renderModels(); renderUpdate();
@@ -450,7 +460,7 @@ function modelCard(m) {
 function renderModels() {
   const ah = (S.addons || []).map(modelCard).join("");
   if ($("#addons").dataset.h !== ah) { $("#addons").innerHTML = ah; $("#addons").dataset.h = ah; }
-  renderRefNeed();
+  renderRefNeed(); renderTurboNeed();
   const html = S.models.map(modelCard).join("");
   for (const id of ["#models", "#setupModels"]) if ($(id).dataset.h !== html) { $(id).innerHTML = html; $(id).dataset.h = html; }
   document.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
@@ -516,6 +526,7 @@ async function generate(extra) {
     safe_mode: $("#safe").checked,
   }, refData ? { ref_image: refData, ref_mode: refMode, ref_strength: +$("#refStrength").value / 100 } : {}, extra || {});
   if (refData && refMode === "style" && !styleReady()) { toast("Download the Style copier first (see the orange box)."); return; }
+  if (body.quality === "turbo" && !speedReady()) { toast("Download the Speed pack first (see the orange box)."); return; }
   $("#jobErr").classList.add("hidden");
   try {
     const r = await post("/api/generate", body);
@@ -634,6 +645,27 @@ function setRefMode(m) {
   $("#refHelp").textContent = c.help;
   renderRefNeed();
 }
+function addonAction(id) {
+  const a = (S.addons || []).find(x => x.id === id), d = (a && a.download) || {};
+  if (!a) return "";
+  if (!S.engine.installed) return `<span>Install the AI engine first (Setup tab).</span>`;
+  if (d.active) return `<div>${esc(d.message)} ${d.total ? gb(d.done) + " of " + gb(d.total) : ""}</div><div class="bar" style="margin-top:6px"><div style="width:${d.total ? (d.done / d.total * 100).toFixed(1) : 0}%"></div></div>`;
+  return `<button class="btn primary small" data-dl="${id}">Download ${esc(a.name)} (~${a.approx_gb} GB)</button>` + (d.error ? `<div class="err">Failed: ${esc(d.error)}</div>` : "");
+}
+function bindAddonButtons(root) {
+  root.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
+    try { await post("/api/download-model", { id: b.dataset.dl }); refresh(); } catch (e) { toast(e.message); }
+  });
+}
+function speedReady() { return !!(S && S.addons && S.addons.find(a => a.id === "speed" && a.ready)); }
+function renderTurboNeed() {
+  const need = S && $("#quality").value === "turbo" && !speedReady();
+  $("#turboNeed").classList.toggle("hidden", !need);
+  if (!need) return;
+  const html = addonAction("speed");
+  if ($("#turboNeedAct").dataset.h !== html) { $("#turboNeedAct").innerHTML = html; $("#turboNeedAct").dataset.h = html; bindAddonButtons($("#turboNeedAct")); }
+}
+$("#quality").addEventListener("change", renderTurboNeed);
 function renderRefNeed() {
   const need = !!refData && refMode === "style" && S && !styleReady();
   $("#refNeed").classList.toggle("hidden", !need);

@@ -71,6 +71,7 @@ class App:
                        for a in models.ADDONS],
             "generator": {"loaded": gen.loaded_model if gen else None,
                           "gpu": gen.gpu if gen else "", "offload": gen.offload if gen else False,
+                          "mode": gen.mode if gen else "",
                           "busy": gen.busy() if gen else False},
             "settings": settings.load(),
             "choices": {"styles": {k: v[0] for k, v in styles.STYLES.items()},
@@ -302,6 +303,9 @@ def make_handler(app: App):
                     return self._json({"error": str(e)}, 400)
                 if not engine_setup.is_installed():
                     return self._json({"error": "Install the AI engine first (Setup tab)."}, 400)
+                if params["quality"] == "turbo" and not models.is_ready("speed"):
+                    return self._json({"error": "Turbo needs the Speed pack add-on (about 1.1 GB). "
+                                                "Download it in the Models tab."}, 400)
                 if not models.is_ready(params["model"]):
                     return self._json({"error": f"Download the {models.get(params['model']).name} "
                                                 "model first (Models tab)."}, 400)

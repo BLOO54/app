@@ -32,7 +32,7 @@ class ModelInfo:
     repo: str
     about: str
     guidance: float
-    steps: dict = field(default_factory=lambda: {"fast": 20, "balanced": 30, "best": 40})
+    steps: dict = field(default_factory=lambda: {"turbo": 8, "fast": 20, "balanced": 30, "best": 40})
     scheduler: str = "dpmpp_2m_karras"
     prompt_prefix: str = ""
     prompt_suffix: str = ""
@@ -47,7 +47,7 @@ CATALOG: list[ModelInfo] = [
         repo="RunDiffusion/Juggernaut-XL-v9",
         about="Best all-rounder: realistic photos, people, places, game art, anything.",
         guidance=5.0,
-        steps={"fast": 20, "balanced": 30, "best": 40},
+        steps={"turbo": 8, "fast": 20, "balanced": 30, "best": 40},
         scheduler="dpmpp_2m_karras",
         negative="blurry, low quality, worst quality, deformed, bad anatomy, extra fingers, watermark, text",
         approx_gb=6.5,
@@ -58,7 +58,7 @@ CATALOG: list[ModelInfo] = [
         repo="cagliostrolab/animagine-xl-4.0",
         about="Anime and cartoon style. Works best with short tags, like: 1girl, red hair, sword, night city",
         guidance=5.0,
-        steps={"fast": 20, "balanced": 28, "best": 35},
+        steps={"turbo": 8, "fast": 20, "balanced": 28, "best": 35},
         scheduler="euler_a",
         prompt_suffix=", masterpiece, high score, great score, absurdres",
         negative="lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, cropped, "
@@ -72,24 +72,36 @@ CATALOG: list[ModelInfo] = [
 class Addon:
     id: str
     name: str
-    repo: str
     about: str
-    files: list
+    parts: list          # [(hugging face repo, [files], sub-folder on disk)]
     approx_gb: float
+
+    @property
+    def repos(self) -> list:
+        return [r for r, _f, _d in self.parts]
 
 
 # "IP-Adapter": lets the AI look at a reference picture and copy its art style
 STYLE_ADDON = Addon(
     id="style",
     name="Style copier (IP-Adapter)",
-    repo="h94/IP-Adapter",
     about="Lets you give the app a reference picture and copy its art style. Works with every model.",
-    files=["sdxl_models/ip-adapter_sdxl.safetensors",
-           "sdxl_models/image_encoder/config.json",
-           "sdxl_models/image_encoder/model.safetensors"],
+    parts=[("h94/IP-Adapter", ["sdxl_models/ip-adapter_sdxl.safetensors",
+                               "sdxl_models/image_encoder/config.json",
+                               "sdxl_models/image_encoder/model.safetensors"], "")],
     approx_gb=4.4,
 )
-ADDONS = [STYLE_ADDON]
+# "Hyper-SD" speed-up (8 steps instead of 30) + a picture-finisher (VAE) that works in half the memory
+SPEED_ADDON = Addon(
+    id="speed",
+    name="Speed pack (Turbo)",
+    about="Adds the Turbo quality: pictures in 8 steps instead of 30 (several times faster), and a "
+          "lighter picture-finisher that uses less graphics memory. Works with every model.",
+    parts=[("ByteDance/Hyper-SD", ["Hyper-SDXL-8steps-CFG-lora.safetensors"], ""),
+           ("madebyollin/sdxl-vae-fp16-fix", ["config.json", "diffusion_pytorch_model.safetensors"], "vae")],
+    approx_gb=1.1,
+)
+ADDONS = [SPEED_ADDON, STYLE_ADDON]
 
 
 def get_addon(addon_id: str) -> Addon | None:
@@ -100,25 +112,33 @@ def all_ids() -> set:
     return {m.id for m in CATALOG} | {a.id for a in ADDONS}
 
 
-def plan_download(item_id: str, siblings: list[tuple[str, int]]) -> tuple[list[tuple[str, int]], bool]:
-    """Which files to fetch for a model or add-on. Raises RuntimeError if something is missing."""
+def repos_of(item_id: str) -> list:
+    addon = get_addon(item_id)
+    return addon.repos if addon else [get(item_id).repo]
+
+
+def plan_download(item_id: str, siblings: dict) -> tuple[list[tuple[str, str, int, str]], bool]:
+    """Which files to fetch for a model or add-on.
+
+    `siblings` is {repo: [(path, size)]}. Returns ([(repo, path, size, sub_folder)], uses_fp16).
+    Raises RuntimeError if something is missing.
+    """
     addon = get_addon(item_id)
     if addon:
-        sizes = dict(siblings)
-        missing = [f for f in addon.files if f not in sizes]
-        if missing:
-            raise RuntimeError("missing files on Hugging Face: " + ", ".join(missing))
-        return [(f, sizes[f]) for f in addon.files], False
-    chosen, fp16 = select_files(siblings)
+        out = []
+        for repo, files, sub in addon.parts:
+            sizes = dict(siblings.get(repo, []))
+            missing = [f for f in files if f not in sizes]
+            if missing:
+                raise RuntimeError(f"missing files on Hugging Face ({repo}): " + ", ".join(missing))
+            out += [(repo, f, sizes[f], sub) for f in files]
+        return out, False
+    repo = get(item_id).repo
+    chosen, fp16 = select_files(siblings.get(repo, []))
     problem = check_layout(chosen)
     if problem:
         raise RuntimeError(problem)
-    return chosen, fp16
-
-
-def repo_of(item_id: str) -> str:
-    addon = get_addon(item_id)
-    return addon.repo if addon else get(item_id).repo
+    return [(repo, n, sz, "") for n, sz in chosen], fp16
 
 
 def get(model_id: str) -> ModelInfo:
@@ -232,14 +252,15 @@ class Downloads:
             self.state.setdefault(model_id, {}).update(kw)
 
     def _run(self, model_id: str):
-        repo = repo_of(model_id)
         target = model_dir(model_id)
         try:
             from huggingface_hub import HfApi, hf_hub_download  # installed with the AI engine
-            info = HfApi().model_info(repo, files_metadata=True)
-            sib = [(s.rfilename, int(s.size or 0)) for s in info.siblings]
+            sib = {}
+            for repo in repos_of(model_id):
+                info = HfApi().model_info(repo, files_metadata=True)
+                sib[repo] = [(s.rfilename, int(s.size or 0)) for s in info.siblings]
             chosen, fp16 = plan_download(model_id, sib)
-            total = sum(s for _, s in chosen)
+            total = sum(c[2] for c in chosen)
             self._set(model_id, total=total, message="Downloading...")
             target.mkdir(parents=True, exist_ok=True)
 
@@ -250,10 +271,10 @@ class Downloads:
                     self._set(model_id, done=min(total, _dir_size(target)))
             threading.Thread(target=watch, daemon=True).start()
             try:
-                for name, _size in sorted(chosen, key=lambda f: f[1]):
+                for repo, name, _size, sub in sorted(chosen, key=lambda f: f[2]):
                     for attempt in range(4):
                         try:
-                            hf_hub_download(repo, name, local_dir=str(target))
+                            hf_hub_download(repo, name, local_dir=str(target / sub if sub else target))
                             break
                         except Exception as e:  # network hiccup - try again (it resumes)
                             if attempt == 3:
@@ -265,7 +286,10 @@ class Downloads:
             finally:
                 stop.set()
             shutil.rmtree(target / ".cache", ignore_errors=True)
-            (target / "ready.json").write_text(json.dumps({"repo": repo, "fp16": fp16,
+            for _r, _n, _s, sub in chosen:
+                if sub:
+                    shutil.rmtree(target / sub / ".cache", ignore_errors=True)
+            (target / "ready.json").write_text(json.dumps({"repos": repos_of(model_id), "fp16": fp16,
                                                            "files": len(chosen), "bytes": total}),
                                                encoding="utf-8")
             self._set(model_id, done=total, active=False, message="Ready")

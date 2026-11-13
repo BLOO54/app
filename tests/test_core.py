@@ -107,15 +107,25 @@ def test_every_model_has_all_quality_steps():
         assert set(m.steps) == set(styles.QUALITY)
 
 
-def test_style_addon_plan():
-    files = models.STYLE_ADDON.files
-    sib = [(f, 100) for f in files] + [("models/other.bin", 5)]
-    chosen, fp16 = models.plan_download("style", sib)
-    assert [n for n, _ in chosen] == files and not fp16
-    with pytest.raises(RuntimeError):
-        models.plan_download("style", sib[1:])
-    assert models.repo_of("style") == "h94/IP-Adapter"
-    assert "style" in models.all_ids() and "juggernaut" in models.all_ids()
+def test_addon_plans():
+    for a in models.ADDONS:
+        sib = {repo: [(f, 100) for f in files] + [("other.bin", 5)] for repo, files, _ in a.parts}
+        chosen, fp16 = models.plan_download(a.id, sib)
+        assert [c[1] for c in chosen] == [f for _, files, _ in a.parts for f in files] and not fp16
+        first_repo = a.parts[0][0]
+        broken = dict(sib, **{first_repo: sib[first_repo][1:]})
+        with pytest.raises(RuntimeError):
+            models.plan_download(a.id, broken)
+    chosen, _ = models.plan_download("speed", {r: [(f, 1) for f in fs] for r, fs, _ in models.SPEED_ADDON.parts})
+    assert ("madebyollin/sdxl-vae-fp16-fix", "config.json", 1, "vae") in chosen
+    assert models.repos_of("style") == ["h94/IP-Adapter"]
+    assert {"style", "speed", "juggernaut"} <= models.all_ids()
+
+
+def test_model_plan():
+    sib = {"RunDiffusion/Juggernaut-XL-v9": [("model_index.json", 1), ("unet/diffusion_pytorch_model.fp16.safetensors", 5)]}
+    chosen, fp16 = models.plan_download("juggernaut", sib)
+    assert fp16 and all(c[0] == "RunDiffusion/Juggernaut-XL-v9" and c[3] == "" for c in chosen)
 
 
 def test_reference_params():

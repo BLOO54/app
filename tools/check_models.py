@@ -20,7 +20,7 @@ bad = 0
 for m in models.CATALOG:
     try:
         info = HfApi().model_info(m.repo, files_metadata=True)
-        chosen, fp16 = models.select_files([(s.rfilename, int(s.size or 0)) for s in info.siblings])
+        chosen, fp16 = models.select_files([(s.rfilename, int(s.size or 0)) for s in info.siblings])  # noqa
         problem = models.check_layout(chosen)
         total = sum(s for _, s in chosen) / 1024**3
         print(f"{'✔' if not problem else '✘'} {m.name:20} {m.repo:40} {len(chosen):3} files  "
@@ -34,11 +34,12 @@ for m in models.CATALOG:
         bad += 1
 for a in models.ADDONS:
     try:
-        info = HfApi().model_info(a.repo, files_metadata=True)
-        chosen, _ = models.plan_download(a.id, [(s.rfilename, int(s.size or 0)) for s in info.siblings])
-        print(f"✔ {a.name:28} {a.repo:30} {sum(s for _, s in chosen) / 1024**3:5.2f} GB")
-        for name, size in chosen:
-            print(f"      {name}  {size / 1024**2:.1f} MB")
+        sib = {r: [(s.rfilename, int(s.size or 0)) for s in HfApi().model_info(r, files_metadata=True).siblings]
+               for r in a.repos}
+        chosen, _ = models.plan_download(a.id, sib)
+        print(f"✔ {a.name:28} {sum(c[2] for c in chosen) / 1024**3:5.2f} GB")
+        for repo, name, size, sub in chosen:
+            print(f"      {repo} :: {name} -> {sub or '.'}  {size / 1024**2:.1f} MB")
     except Exception as e:
         print(f"✘ {a.name}: {e!r}")
         bad += 1

@@ -22,7 +22,7 @@ ASPECTS = {
     "wide":      ("Extra wide (wallpaper)", 1344, 768),
 }
 
-QUALITY = {"fast": "Fast", "balanced": "Balanced", "best": "Best"}
+QUALITY = {"turbo": "Turbo (fastest, needs Speed pack)", "fast": "Fast", "balanced": "Balanced", "best": "Best"}
 
 
 def apply_style(prompt: str, style: str) -> str:
