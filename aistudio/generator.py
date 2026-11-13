@@ -68,13 +68,26 @@ def make_job_params(raw: dict) -> dict:
     _label, w, h = styles.ASPECTS[aspect]
     user_neg = str(raw.get("negative") or "").strip()[:1000]
     safe_mode = bool(raw.get("safe_mode", True))
+    ref_path = raw.get("ref_path") or None          # set by the server after it saved the upload
+    ref_mode = raw.get("ref_mode") if raw.get("ref_mode") in ("style", "remix") else None
+    if not ref_path:
+        ref_mode = None
+    if not ref_mode:
+        ref_path = None
+    try:
+        ref_strength = float(raw.get("ref_strength", 0.6))
+    except (TypeError, ValueError):
+        ref_strength = 0.6
+    lo, hi = (0.1, 1.0) if ref_mode == "style" else (0.2, 0.95)
+    ref_strength = round(max(lo, min(hi, ref_strength)), 2)
     full_prompt = m.prompt_prefix + styles.apply_style(prompt, style) + m.prompt_suffix
     negative = ", ".join(x for x in [user_neg, m.negative] if x)
     negative = safety.build_negative(negative, safe_mode)
     return {"prompt": prompt, "full_prompt": full_prompt, "negative": negative, "user_negative": user_neg,
             "model": m.id, "aspect": aspect, "width": w, "height": h, "quality": quality,
             "steps": int(m.steps[quality]), "guidance": float(m.guidance), "style": style,
-            "count": count, "seed": seed, "safe_mode": safe_mode}
+            "count": count, "seed": seed, "safe_mode": safe_mode,
+            "ref_path": ref_path, "ref_mode": ref_mode, "ref_strength": ref_strength}
 
 
 class Generator:
@@ -83,6 +96,9 @@ class Generator:
         self._q: queue.Queue[Job] = queue.Queue()
         self._lock = threading.Lock()
         self.pipe = None
+        self.i2i = None             # "remix" version of the pipeline (shares the same model parts)
+        self.ip_loaded = False      # style copier attached?
+        self.placed = None          # which pipeline is currently set up on the graphics card
         self.loaded_model: str | None = None
         self.offload = False
         self.device = "cpu"
@@ -121,6 +137,9 @@ class Generator:
     def _unload(self):
         if self.pipe is not None:
             self.pipe = None
+            self.i2i = None
+            self.ip_loaded = False
+            self.placed = None
             self.loaded_model = None
             try:
                 import gc
@@ -143,13 +162,17 @@ class Generator:
     def load_pipeline(self, source: str, fp16_files: bool, scheduler: str = "dpmpp_2m_karras",
                       force_offload: bool = False):
         """Load a model folder (or a Hugging Face name, used by the build tests)."""
+        import os
+
         import torch
         from diffusers import StableDiffusionXLPipeline
 
         cuda = torch.cuda.is_available()
         self.device = "cuda" if cuda else "cpu"
-        dtype = torch.float16 if cuda else torch.float32
-        import os
+        if cuda:
+            dtype = torch.float16
+        else:
+            dtype = torch.bfloat16 if os.environ.get("AISTUDIO_CPU_DTYPE") == "bf16" else torch.float32
         kw = {"torch_dtype": dtype}
         if os.path.isdir(source):
             kw["use_safetensors"] = True
@@ -189,7 +212,61 @@ class Generator:
         info = models.ready_info(model_id)
         self.pipe = self.load_pipeline(str(models.model_dir(model_id)), bool(info.get("fp16")),
                                        m.scheduler, force_offload=force_offload)
+        self.placed = self.pipe
         self.loaded_model = model_id
+
+    # ------------------------------------------------------------ reference pictures
+    def _place(self, pipe):
+        """Put a pipeline on the graphics card (or set up low-memory mode for it)."""
+        if self.placed is pipe:
+            return
+        if self.device == "cuda":
+            if self.offload:
+                pipe.enable_model_cpu_offload()
+            else:
+                pipe.to("cuda")
+        self.placed = pipe
+
+    def _set_style_copier(self, on: bool):
+        if on == self.ip_loaded:
+            return
+        if on:
+            if not models.is_ready("style"):
+                raise RuntimeError("Download the Style copier add-on first (Models tab).")
+            self.pipe.load_ip_adapter(str(models.model_dir("style")), subfolder="sdxl_models",
+                                      weight_name="ip-adapter_sdxl.safetensors")
+        else:
+            self.pipe.unload_ip_adapter()
+        self.ip_loaded = on
+        self.placed = None      # parts changed - set up the graphics card again
+        self.i2i = None
+
+    def _prepare(self, job: Job):
+        """Pick the right pipeline for this job. Returns (pipe, extra arguments)."""
+        p = job.params
+        mode = p.get("ref_mode")
+        if mode:
+            from PIL import Image, ImageOps
+            ref = Image.open(p["ref_path"]).convert("RGB")
+        if mode == "style":
+            job.message = "Getting the style copier ready..."
+            self._set_style_copier(True)
+            self._place(self.pipe)
+            # "InstantStyle": only the style layers look at the reference, so it copies the look, not the content
+            self.pipe.set_ip_adapter_scale({"up": {"block_0": [0.0, p["ref_strength"], 0.0]}})
+            return self.pipe, {"width": p["width"], "height": p["height"], "ip_adapter_image": ref}
+        self._set_style_copier(False)
+        if mode == "remix":
+            from diffusers import StableDiffusionXLImg2ImgPipeline
+            if self.i2i is None:
+                self.i2i = StableDiffusionXLImg2ImgPipeline.from_pipe(self.pipe)
+                self.i2i.set_progress_bar_config(disable=True)
+            self._place(self.i2i)
+            start = ImageOps.fit(ref, (p["width"], p["height"]), method=Image.LANCZOS)
+            job.steps = max(1, int(p["steps"] * p["ref_strength"]))
+            return self.i2i, {"image": start, "strength": p["ref_strength"]}
+        self._place(self.pipe)
+        return self.pipe, {"width": p["width"], "height": p["height"]}
 
     def _worker(self):
         while True:
@@ -224,6 +301,7 @@ class Generator:
         import torch
         from PIL.PngImagePlugin import PngInfo
         p = job.params
+        pipe, extra = self._prepare(job)
         job.state = "running"
         for i in range(p["count"]):
             if job.cancel:
@@ -240,9 +318,9 @@ class Generator:
 
             gen = torch.Generator(device="cpu").manual_seed(seed)
             t0 = time.time()
-            out = self.pipe(prompt=p["full_prompt"], negative_prompt=p["negative"] or None,
-                            width=p["width"], height=p["height"], num_inference_steps=p["steps"],
-                            guidance_scale=p["guidance"], generator=gen, callback_on_step_end=on_step)
+            out = pipe(prompt=p["full_prompt"], negative_prompt=p["negative"] or None,
+                       num_inference_steps=p["steps"], guidance_scale=p["guidance"], generator=gen,
+                       callback_on_step_end=on_step, **extra)
             if job.cancel:
                 break
             img = out.images[0]
@@ -251,12 +329,14 @@ class Generator:
             meta.add_text("parameters",
                           f"{p['full_prompt']}\nNegative prompt: {p['negative']}\n"
                           f"Steps: {p['steps']}, CFG scale: {p['guidance']}, Seed: {seed}, "
-                          f"Size: {p['width']}x{p['height']}, Model: {models.get(p['model']).name}")
+                          f"Size: {p['width']}x{p['height']}, Model: {models.get(p['model']).name}"
+                          + (f", Reference: {p['ref_mode']} {p['ref_strength']}" if p.get("ref_mode") else ""))
             img.save(paths.pictures_dir() / name, pnginfo=meta)
             entry = {"file": name, "prompt": p["prompt"], "negative": p["user_negative"], "model": p["model"],
                      "style": p["style"], "aspect": p["aspect"], "quality": p["quality"], "seed": seed,
                      "width": p["width"], "height": p["height"], "steps": p["steps"],
-                     "seconds": round(time.time() - t0, 1), "time": time.time()}
+                     "seconds": round(time.time() - t0, 1), "time": time.time(),
+                     "ref_mode": p.get("ref_mode"), "ref_strength": p.get("ref_strength")}
             gallery.add(entry)
             job.images.append(entry)
             log.info("made %s in %.1fs", name, time.time() - t0)

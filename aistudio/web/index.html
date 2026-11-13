@@ -70,6 +70,18 @@
   .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; }
   .toggle input { width: 18px; height: 18px; accent-color: var(--b); }
   #go { padding: 14px; font-size: 16px; }
+  .drop { border: 1px dashed #3a3a4e; border-radius: 12px; padding: 12px; text-align: center; color: var(--muted);
+    cursor: pointer; font-size: 13px; background: var(--panel2); transition: border-color .2s, background .2s; }
+  .drop:hover, .drop.over { border-color: var(--b); background: #22222f; }
+  .refbox { display: flex; gap: 12px; align-items: flex-start; }
+  .refbox img { width: 92px; height: 92px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+  .refbox .opts { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .seg { display: flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+  .seg button { flex: 1; border: 0; background: none; padding: 6px 4px; border-radius: 8px; cursor: pointer;
+    color: var(--muted); font-size: 12.5px; }
+  .seg button.on { background: var(--grad); color: #fff; }
+  input[type=range] { width: 100%; accent-color: var(--b); }
+  .note { font-size: 12.5px; background: #24180f; border: 1px solid #4a2f17; color: #fdba74; border-radius: 10px; padding: 8px 10px; }
   .hint { font-size: 12px; color: var(--muted); }
 
   .stage { min-height: 400px; }
@@ -136,6 +148,32 @@
         <label class="f">What do you want to see?
           <textarea id="prompt" placeholder="e.g. a giant robot dragon flying over a neon city at night, epic, highly detailed"></textarea>
         </label>
+        <div>
+          <div class="hint" style="margin-bottom:6px">Reference picture (optional)</div>
+          <div id="refDrop" class="drop">🖼️ Click, drag a picture here, or press Ctrl + V to paste one</div>
+          <input type="file" id="refFile" accept="image/*" class="hidden">
+          <div id="refBox" class="refbox hidden">
+            <img id="refImg" alt="reference">
+            <div class="opts">
+              <div class="seg">
+                <button data-mode="style" class="on">Copy the art style</button>
+                <button data-mode="remix">Remix this picture</button>
+              </div>
+              <label class="f" style="gap:2px"><span id="refLabel">How strongly to copy the style</span>
+                <input type="range" id="refStrength" min="10" max="100" value="70">
+              </label>
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span class="hint" id="refVal">70%</span>
+                <button class="btn small" id="refClear">Remove ✕</button>
+              </div>
+            </div>
+          </div>
+          <div id="refHelp" class="hint hidden" style="margin-top:6px"></div>
+          <div id="refNeed" class="note hidden" style="margin-top:8px">
+            Copying an art style needs the <b>Style copier</b> add-on (one-time download, about 4.4 GB).
+            <div style="margin-top:8px" id="refNeedAct"></div>
+          </div>
+        </div>
         <div>
           <div class="hint" style="margin-bottom:6px">Style</div>
           <div class="chips" id="styles"></div>
@@ -210,6 +248,9 @@
     <h2>AI models</h2>
     <p class="muted" style="margin-top:0">Each model draws in its own style. They download once (about 7 GB each) and then work offline.</p>
     <div id="models" class="models"></div>
+    <h2 style="margin-top:28px">Add-ons</h2>
+    <p class="muted" style="margin-top:0">Extra abilities that work with every model.</p>
+    <div id="addons" class="models"></div>
   </section>
 
   <!-- SETUP -->
@@ -272,6 +313,13 @@ let job = null;          // current job id
 let curCount = 1, curStyle = "none";
 let lbItem = null;
 let offline = 0;
+let refData = null, refMode = "style";
+const REF = {
+  style: { label: "How strongly to copy the style", min: 10, max: 100, def: 70,
+           help: "Uses the colors, lines and feel of your picture for whatever you type. Your prompt decides WHAT is in the picture." },
+  remix: { label: "How much to change it", min: 20, max: 95, def: 60,
+           help: "Starts from your picture and changes it to match your prompt. Low = small changes, high = big changes. Uses the size you picked." },
+};
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -387,6 +435,9 @@ function modelCard(m) {
   return `<div class="card model"><div><h3>${esc(m.name)}</h3><div class="muted">${esc(m.about)}</div></div>${action}</div>`;
 }
 function renderModels() {
+  const ah = (S.addons || []).map(modelCard).join("");
+  if ($("#addons").dataset.h !== ah) { $("#addons").innerHTML = ah; $("#addons").dataset.h = ah; }
+  renderRefNeed();
   const html = S.models.map(modelCard).join("");
   for (const id of ["#models", "#setupModels"]) if ($(id).dataset.h !== html) { $(id).innerHTML = html; $(id).dataset.h = html; }
   document.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
@@ -450,7 +501,8 @@ async function generate(extra) {
     prompt, model: $("#model").value, aspect: $("#aspect").value, quality: $("#quality").value,
     style: curStyle, count: curCount, negative: $("#negative").value, seed: $("#seed").value,
     safe_mode: $("#safe").checked,
-  }, extra || {});
+  }, refData ? { ref_image: refData, ref_mode: refMode, ref_strength: +$("#refStrength").value / 100 } : {}, extra || {});
+  if (refData && refMode === "style" && !styleReady()) { toast("Download the Style copier first (see the orange box)."); return; }
   $("#jobErr").classList.add("hidden");
   try {
     const r = await post("/api/generate", body);
@@ -528,7 +580,8 @@ function openLb(it) {
   $("#lbNeg").innerHTML = it.negative ? `<b>Not wanted:</b> ${esc(it.negative)}` : "";
   const m = S && S.models.find(x => x.id === it.model);
   $("#lbInfo").innerHTML = `<b>Model:</b> ${esc(m ? m.name : it.model)}<br><b>Style:</b> ${esc(S ? S.choices.styles[it.style] || it.style : it.style)}<br>` +
-    `<b>Size:</b> ${it.width}×${it.height}<br><b>Seed:</b> ${it.seed}<br><b>Steps:</b> ${it.steps}` + (it.seconds ? `<br><b>Took:</b> ${it.seconds}s` : "");
+    `<b>Size:</b> ${it.width}×${it.height}<br><b>Seed:</b> ${it.seed}<br><b>Steps:</b> ${it.steps}` + (it.seconds ? `<br><b>Took:</b> ${it.seconds}s` : "") +
+    (it.ref_mode ? `<br><b>Reference:</b> ${it.ref_mode === "style" ? "copied art style" : "remixed picture"} (${Math.round(it.ref_strength * 100)}%)` : "");
   $("#lbDl").href = "/images/" + encodeURIComponent(it.file) + "?download=1";
   $("#lbDl").setAttribute("download", it.file);
   $("#lbDel").textContent = "Delete"; delete $("#lbDel").dataset.sure;
@@ -556,6 +609,64 @@ $("#lbDel").onclick = async () => {
 };
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeLb(); });
 $("#lb").addEventListener("click", e => { if (e.target.classList.contains("pic")) closeLb(); });
+
+// ---------------------------------------------------------------- reference picture
+function styleReady() { return !!(S && S.addons && S.addons.find(a => a.id === "style" && a.ready)); }
+function setRefMode(m) {
+  refMode = m;
+  document.querySelectorAll(".seg button").forEach(b => b.classList.toggle("on", b.dataset.mode === m));
+  const c = REF[m], r = $("#refStrength");
+  r.min = c.min; r.max = c.max; r.value = c.def;
+  $("#refLabel").textContent = c.label; $("#refVal").textContent = c.def + "%";
+  $("#refHelp").textContent = c.help;
+  renderRefNeed();
+}
+function renderRefNeed() {
+  const need = !!refData && refMode === "style" && S && !styleReady();
+  $("#refNeed").classList.toggle("hidden", !need);
+  if (!need) return;
+  const a = S.addons.find(x => x.id === "style"), d = (a && a.download) || {};
+  let html;
+  if (!S.engine.installed) html = `<span>Install the AI engine first (Setup tab).</span>`;
+  else if (d.active) html = `<div>${esc(d.message)} ${d.total ? gb(d.done) + " of " + gb(d.total) : ""}</div><div class="bar" style="margin-top:6px"><div style="width:${d.total ? (d.done / d.total * 100).toFixed(1) : 0}%"></div></div>`;
+  else html = `<button class="btn primary small" data-dl="style">Download Style copier (~${a.approx_gb} GB)</button>` + (d.error ? `<div class="err">Failed: ${esc(d.error)}</div>` : "");
+  if ($("#refNeedAct").dataset.h !== html) {
+    $("#refNeedAct").innerHTML = html; $("#refNeedAct").dataset.h = html;
+    const b = $("#refNeedAct [data-dl]");
+    if (b) b.onclick = async () => { try { await post("/api/download-model", { id: "style" }); refresh(); } catch (e) { toast(e.message); } };
+  }
+}
+function loadRef(file) {
+  if (!file || !file.type.startsWith("image/")) { toast("That isn't a picture."); return; }
+  if (file.size > 25 * 1024 * 1024) { toast("That picture is too big (25 MB max)."); return; }
+  const fr = new FileReader();
+  fr.onload = () => {
+    refData = fr.result;
+    $("#refImg").src = refData;
+    $("#refBox").classList.remove("hidden"); $("#refDrop").classList.add("hidden");
+    $("#refHelp").classList.remove("hidden");
+    setRefMode(refMode);
+  };
+  fr.readAsDataURL(file);
+}
+function clearRef() {
+  refData = null; $("#refFile").value = "";
+  $("#refBox").classList.add("hidden"); $("#refDrop").classList.remove("hidden");
+  $("#refHelp").classList.add("hidden"); $("#refNeed").classList.add("hidden");
+}
+$("#refDrop").onclick = () => $("#refFile").click();
+$("#refFile").onchange = e => loadRef(e.target.files[0]);
+$("#refClear").onclick = clearRef;
+document.querySelectorAll(".seg button").forEach(b => b.onclick = () => setRefMode(b.dataset.mode));
+$("#refStrength").oninput = e => $("#refVal").textContent = e.target.value + "%";
+const drop = $("#refDrop");
+["dragenter", "dragover"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev === "drop" || !e.relatedTarget) drop.classList.remove("over"); }));
+document.addEventListener("drop", e => { const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) { showTab("create"); loadRef(f); } });
+document.addEventListener("paste", e => {
+  const item = [...(e.clipboardData || {}).items || []].find(i => i.type.startsWith("image/"));
+  if (item) { e.preventDefault(); showTab("create"); loadRef(item.getAsFile()); }
+});
 
 // ---------------------------------------------------------------- loops
 setInterval(() => post("/api/ping").catch(() => {}), 5000);

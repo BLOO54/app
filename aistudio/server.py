@@ -5,6 +5,8 @@ Nothing is reachable from the internet or other computers - "127.0.0.1" means "t
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -64,6 +66,9 @@ class App:
             "models": [{"id": m.id, "name": m.name, "about": m.about, "approx_gb": m.approx_gb,
                         "ready": models.is_ready(m.id), "download": self.downloads.status(m.id)}
                        for m in models.CATALOG],
+            "addons": [{"id": a.id, "name": a.name, "about": a.about, "approx_gb": a.approx_gb,
+                        "ready": models.is_ready(a.id), "download": self.downloads.status(a.id)}
+                       for a in models.ADDONS],
             "generator": {"loaded": gen.loaded_model if gen else None,
                           "gpu": gen.gpu if gen else "", "offload": gen.offload if gen else False,
                           "busy": gen.busy() if gen else False},
@@ -81,7 +86,7 @@ class App:
             return True
         if self.engine.status()["active"] or self.update["downloading"]:
             return True
-        return any(self.downloads.status(m.id).get("active") for m in models.CATALOG)
+        return any(self.downloads.status(i).get("active") for i in models.all_ids())
 
     # ------------------------------------------------------------ updates
     def check_update(self):
@@ -141,6 +146,31 @@ class App:
                 gen.unload()
 
 
+def save_reference(data_url: str) -> str:
+    """Save a picture sent from the page (as a data: URL) and return its path."""
+    from PIL import Image  # installed with the AI engine
+    import io
+    if not isinstance(data_url, str) or "," not in data_url:
+        raise ValueError("That reference picture couldn't be read.")
+    raw = base64.b64decode(data_url.split(",", 1)[1], validate=False)
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except Exception as e:
+        raise ValueError("That file isn't a picture the app can read (try PNG or JPG).") from e
+    img = img.convert("RGB")
+    img.thumbnail((1536, 1536))
+    folder = paths.data_dir() / "refs"
+    folder.mkdir(exist_ok=True)
+    target = folder / f"ref-{hashlib.sha1(raw).hexdigest()[:16]}.png"
+    if not target.exists():
+        img.save(target)
+    old = sorted(folder.glob("ref-*.png"), key=lambda f: f.stat().st_mtime)
+    for f in old[:-30]:
+        f.unlink(missing_ok=True)
+    return str(target)
+
+
 def open_folder(path) -> None:
     try:
         if sys.platform == "win32":
@@ -178,7 +208,7 @@ def make_handler(app: App):
 
         def _body(self) -> dict:
             n = int(self.headers.get("Content-Length") or 0)
-            if n <= 0 or n > 1_000_000:
+            if n <= 0 or n > 40_000_000:
                 return {}
             try:
                 return json.loads(self.rfile.read(n).decode("utf-8"))
@@ -238,7 +268,7 @@ def make_handler(app: App):
                 return self._json({"ok": True})
             if route == "/api/download-model":
                 mid = str(body.get("id") or "")
-                if mid not in {m.id for m in models.CATALOG}:
+                if mid not in models.all_ids():
                     return self._json({"error": "unknown model"}, 400)
                 if not engine_setup.is_installed():
                     return self._json({"error": "Install the AI engine first."}, 400)
@@ -247,14 +277,24 @@ def make_handler(app: App):
             if route == "/api/delete-model":
                 mid = str(body.get("id") or "")
                 gen = app._generator
-                if gen and gen.loaded_model == mid:
+                if gen and (gen.loaded_model == mid or (mid == "style" and gen.ip_loaded)):
+                    if gen.busy():
+                        return self._json({"error": "Wait until the pictures are finished."}, 400)
                     gen.unload()
-                if mid in {m.id for m in models.CATALOG}:
+                if mid in models.all_ids():
                     models.delete(mid)
                 return self._json({"ok": True})
             if route == "/api/generate":
                 from .generator import NotAllowed, make_job_params
+                ref = body.pop("ref_image", None)
+                body.pop("ref_path", None)
                 try:
+                    if ref and body.get("ref_mode") in ("style", "remix"):
+                        if not engine_setup.is_installed():
+                            raise ValueError("Install the AI engine first (Setup tab).")
+                        if body["ref_mode"] == "style" and not models.is_ready("style"):
+                            raise ValueError("Download the Style copier add-on first (Models tab).")
+                        body["ref_path"] = save_reference(ref)
                     params = make_job_params(body)
                 except NotAllowed as e:
                     return self._json({"error": str(e), "blocked": True}, 400)

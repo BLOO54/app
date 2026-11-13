@@ -20,7 +20,7 @@ env:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -128,7 +128,45 @@ jobs:
           $r = Get-Content ci-download.json -Raw | ConvertFrom-Json
           if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "model download failed: $($r.error)" }
           "{0:N2} GB downloaded" -f ($r.done / 1GB)
-          Remove-Item -Recurse -Force "$env:LOCALAPPDATA\AIImageStudio\models\juggernaut"
+
+      - name: Download the Style copier add-on (no console)
+        timeout-minutes: 15
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $p = Start-Process "$dir\python\pythonw.exe" -ArgumentList "-m","aistudio","--download-test","style","$PWD\ci-download-style.json" -WorkingDirectory "$dir\app" -PassThru
+          if (-not $p.WaitForExit(850000)) { Stop-Process $p -Force; throw "download took too long" }
+          Get-Content ci-download-style.json
+          $r = Get-Content ci-download-style.json -Raw | ConvertFrom-Json
+          if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "add-on download failed: $($r.error)" }
+
+      - name: Real pictures with Juggernaut XL - normal, copy art style, remix (small + few steps, on the processor)
+        timeout-minutes: 40
+        env:
+          AISTUDIO_CPU_DTYPE: bf16
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $ref = "$PWD\ci-reference.png"
+          & "$dir\python\python.exe" -c "from PIL import Image, ImageDraw; im=Image.new('RGB',(512,512),(250,240,200)); d=ImageDraw.Draw(im); [d.ellipse((40+i*30,40+i*20,300+i*20,300+i*25),outline=(20+i*20,60,200-i*15),width=9) for i in range(8)]; im.save(r'$ref')"
+          $spec = @(
+            @{ name = "normal"; prompt = "a red apple on a wooden table"; test_size = 512; test_steps = 2 },
+            @{ name = "style";  prompt = "a cat"; ref_file = $ref; ref_mode = "style"; ref_strength = 0.8; test_size = 512; test_steps = 2 },
+            @{ name = "remix";  prompt = "colorful circles, watercolor"; ref_file = $ref; ref_mode = "remix"; ref_strength = 0.7; test_size = 512; test_steps = 3 },
+            @{ name = "normal-after-style"; prompt = "a blue car"; test_size = 512; test_steps = 2 }
+          ) | ConvertTo-Json
+          Set-Content -Path ci-jobs.json -Value $spec -Encoding utf8
+          Push-Location "$dir\app"
+          & "$dir\python\python.exe" -m aistudio --job-test "$env:GITHUB_WORKSPACE\ci-jobs.json" "$env:GITHUB_WORKSPACE\ci-job-report.json"
+          $code = $LASTEXITCODE
+          Pop-Location
+          Get-Content ci-job-report.json
+          $r = Get-Content ci-job-report.json -Raw | ConvertFrom-Json
+          $i = 0
+          foreach ($j in $r.jobs) { if ($j.picture) { Copy-Item $j.picture "ci-picture-$($j.name).png" } }
+          if ($code -ne 0 -or -not $r.ok) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 60; throw "a picture job failed" }
+
+      - name: Free disk space (delete test models)
+        if: always()
+        run: Remove-Item -Recurse -Force "$env:LOCALAPPDATA\AIImageStudio\models" -ErrorAction SilentlyContinue
 
       - name: Picture of the app window
         continue-on-error: true
@@ -178,6 +216,10 @@ jobs:
             models-check.txt
             ci-*.txt
             ci-test-picture.png
+            ci-picture-*.png
+            ci-reference.png
+            ci-job-report.json
+            ci-download*.json
             window.png
             app.log
 

@@ -68,6 +68,59 @@ CATALOG: list[ModelInfo] = [
 ]
 
 
+@dataclass
+class Addon:
+    id: str
+    name: str
+    repo: str
+    about: str
+    files: list
+    approx_gb: float
+
+
+# "IP-Adapter": lets the AI look at a reference picture and copy its art style
+STYLE_ADDON = Addon(
+    id="style",
+    name="Style copier (IP-Adapter)",
+    repo="h94/IP-Adapter",
+    about="Lets you give the app a reference picture and copy its art style. Works with every model.",
+    files=["sdxl_models/ip-adapter_sdxl.safetensors",
+           "sdxl_models/image_encoder/config.json",
+           "sdxl_models/image_encoder/model.safetensors"],
+    approx_gb=4.4,
+)
+ADDONS = [STYLE_ADDON]
+
+
+def get_addon(addon_id: str) -> Addon | None:
+    return next((a for a in ADDONS if a.id == addon_id), None)
+
+
+def all_ids() -> set:
+    return {m.id for m in CATALOG} | {a.id for a in ADDONS}
+
+
+def plan_download(item_id: str, siblings: list[tuple[str, int]]) -> tuple[list[tuple[str, int]], bool]:
+    """Which files to fetch for a model or add-on. Raises RuntimeError if something is missing."""
+    addon = get_addon(item_id)
+    if addon:
+        sizes = dict(siblings)
+        missing = [f for f in addon.files if f not in sizes]
+        if missing:
+            raise RuntimeError("missing files on Hugging Face: " + ", ".join(missing))
+        return [(f, sizes[f]) for f in addon.files], False
+    chosen, fp16 = select_files(siblings)
+    problem = check_layout(chosen)
+    if problem:
+        raise RuntimeError(problem)
+    return chosen, fp16
+
+
+def repo_of(item_id: str) -> str:
+    addon = get_addon(item_id)
+    return addon.repo if addon else get(item_id).repo
+
+
 def get(model_id: str) -> ModelInfo:
     for m in CATALOG:
         if m.id == model_id:
@@ -179,16 +232,13 @@ class Downloads:
             self.state.setdefault(model_id, {}).update(kw)
 
     def _run(self, model_id: str):
-        m = get(model_id)
+        repo = repo_of(model_id)
         target = model_dir(model_id)
         try:
             from huggingface_hub import HfApi, hf_hub_download  # installed with the AI engine
-            info = HfApi().model_info(m.repo, files_metadata=True)
+            info = HfApi().model_info(repo, files_metadata=True)
             sib = [(s.rfilename, int(s.size or 0)) for s in info.siblings]
-            chosen, fp16 = select_files(sib)
-            problem = check_layout(chosen)
-            if problem:
-                raise RuntimeError(problem)
+            chosen, fp16 = plan_download(model_id, sib)
             total = sum(s for _, s in chosen)
             self._set(model_id, total=total, message="Downloading...")
             target.mkdir(parents=True, exist_ok=True)
@@ -203,7 +253,7 @@ class Downloads:
                 for name, _size in sorted(chosen, key=lambda f: f[1]):
                     for attempt in range(4):
                         try:
-                            hf_hub_download(m.repo, name, local_dir=str(target))
+                            hf_hub_download(repo, name, local_dir=str(target))
                             break
                         except Exception as e:  # network hiccup - try again (it resumes)
                             if attempt == 3:
@@ -215,7 +265,7 @@ class Downloads:
             finally:
                 stop.set()
             shutil.rmtree(target / ".cache", ignore_errors=True)
-            (target / "ready.json").write_text(json.dumps({"repo": m.repo, "fp16": fp16,
+            (target / "ready.json").write_text(json.dumps({"repo": repo, "fp16": fp16,
                                                            "files": len(chosen), "bytes": total}),
                                                encoding="utf-8")
             self._set(model_id, done=total, active=False, message="Ready")

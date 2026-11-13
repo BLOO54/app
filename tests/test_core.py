@@ -107,6 +107,28 @@ def test_every_model_has_all_quality_steps():
         assert set(m.steps) == set(styles.QUALITY)
 
 
+def test_style_addon_plan():
+    files = models.STYLE_ADDON.files
+    sib = [(f, 100) for f in files] + [("models/other.bin", 5)]
+    chosen, fp16 = models.plan_download("style", sib)
+    assert [n for n, _ in chosen] == files and not fp16
+    with pytest.raises(RuntimeError):
+        models.plan_download("style", sib[1:])
+    assert models.repo_of("style") == "h94/IP-Adapter"
+    assert "style" in models.all_ids() and "juggernaut" in models.all_ids()
+
+
+def test_reference_params():
+    p = make_job_params({"prompt": "x", "ref_path": "/tmp/r.png", "ref_mode": "style", "ref_strength": 5})
+    assert p["ref_mode"] == "style" and p["ref_strength"] == 1.0
+    p = make_job_params({"prompt": "x", "ref_path": "/tmp/r.png", "ref_mode": "remix", "ref_strength": 0.01})
+    assert p["ref_mode"] == "remix" and p["ref_strength"] == 0.2
+    p = make_job_params({"prompt": "x", "ref_mode": "style"})          # no picture -> normal job
+    assert p["ref_mode"] is None and p["ref_path"] is None
+    p = make_job_params({"prompt": "x", "ref_path": "/etc/passwd", "ref_mode": "hack"})
+    assert p["ref_mode"] is None and p["ref_path"] is None
+
+
 # ---------------------------------------------------------------- misc
 def test_gallery_names():
     assert gallery.safe_name("a.png") == "a.png"
@@ -174,6 +196,25 @@ def test_server_blocks_bad_prompt_and_other_sites(server):
     assert code == 400 and d.get("blocked")
     code, _ = _post(server + "/api/ping", {}, headers={"Origin": "https://evil.example"})
     assert code == 403
+
+
+def test_server_reference_upload(server):
+    import base64
+    import io
+    from PIL import Image
+    from aistudio import engine_setup
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), (200, 10, 10)).save(buf, "PNG")
+    url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    from aistudio.server import save_reference
+    path = save_reference(url)
+    assert os.path.exists(path) and Image.open(path).size == (40, 30)
+    with pytest.raises(ValueError):
+        save_reference("data:image/png;base64,bm90IGFuIGltYWdl")
+    # style mode without the add-on gives a friendly error (or engine missing) - never a crash
+    code, d = _post(server + "/api/generate", {"prompt": "a cat", "ref_image": url, "ref_mode": "style"})
+    assert code == 400 and ("Style copier" in d["error"] or "engine" in d["error"])
+    assert engine_setup is not None
 
 
 def test_server_image_path_traversal(server):

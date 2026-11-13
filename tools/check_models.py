@@ -32,4 +32,14 @@ for m in models.CATALOG:
     except Exception as e:
         print(f"✘ {m.name}: {e!r}")
         bad += 1
+for a in models.ADDONS:
+    try:
+        info = HfApi().model_info(a.repo, files_metadata=True)
+        chosen, _ = models.plan_download(a.id, [(s.rfilename, int(s.size or 0)) for s in info.siblings])
+        print(f"✔ {a.name:28} {a.repo:30} {sum(s for _, s in chosen) / 1024**3:5.2f} GB")
+        for name, size in chosen:
+            print(f"      {name}  {size / 1024**2:.1f} MB")
+    except Exception as e:
+        print(f"✘ {a.name}: {e!r}")
+        bad += 1
 sys.exit(1 if bad else 0)

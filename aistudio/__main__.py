@@ -170,6 +170,44 @@ def download_test(model_id: str, report: str) -> int:
     return 0 if st["ready"] and not st.get("error") else 1
 
 
+def job_test(spec_file: str, report: str) -> int:
+    """Run real picture jobs through the app's own drawing code (used by the build machine).
+
+    spec_file: JSON list of jobs like the page sends, plus optional "test_size"/"test_steps"
+    to keep them small, and "ref_file" for a reference picture.
+    """
+    from .generator import Generator, make_job_params
+    with open(spec_file, encoding="utf-8-sig") as fh:
+        specs = json.load(fh)
+    g = Generator()
+    results, ok = [], True
+    for spec in specs:
+        raw = dict(spec)
+        if raw.get("ref_file"):
+            raw["ref_path"] = raw.pop("ref_file")
+        params = make_job_params(raw)
+        size = raw.get("test_size")
+        if size:
+            params["width"] = params["height"] = int(size)
+        if raw.get("test_steps"):
+            params["steps"] = int(raw["test_steps"])
+        t0 = time.time()
+        job = g.submit(params)
+        while job.state in ("queued", "loading", "running"):
+            time.sleep(1)
+        r = {"name": spec.get("name"), "state": job.state, "error": job.error,
+             "images": [i["file"] for i in job.images], "seconds": round(time.time() - t0, 1),
+             "style_copier_loaded": g.ip_loaded}
+        if job.images:
+            r["picture"] = str(paths.pictures_dir() / job.images[0]["file"])
+        ok = ok and job.state == "done" and len(job.images) == params["count"]
+        results.append(r)
+        print(json.dumps(r), flush=True)
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump({"ok": ok, "jobs": results}, fh, indent=2)
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     fix_missing_console()
     ap = argparse.ArgumentParser(prog="aistudio")
@@ -179,6 +217,7 @@ def main(argv=None) -> int:
     ap.add_argument("--gen-test", nargs=2, metavar=("MODEL", "OUT"))
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--download-test", nargs=2, metavar=("MODEL_ID", "REPORT"))
+    ap.add_argument("--job-test", nargs=2, metavar=("SPEC_JSON", "REPORT"))
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args(argv)
@@ -196,6 +235,8 @@ def main(argv=None) -> int:
         return self_test(args.self_test)
     if args.install_engine:
         return install_engine(args.cpu)
+    if args.job_test:
+        return job_test(*args.job_test)
     if args.download_test:
         return download_test(*args.download_test)
     if args.gen_test:
