@@ -1,0 +1,185 @@
+# Builds AI Image Studio on a real Windows machine provided by GitHub, tests it,
+# and publishes:  AIImageStudio-Setup-<version>.exe   (the in-app Update button uses it)
+# Get it from the "Releases" section of the repository page.
+
+name: Build Windows app
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PY_EMBED_VERSION: "3.12.10"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test tools
+        run: pip install pytest pillow huggingface_hub
+
+      - name: Read version
+        id: ver
+        run: |
+          $v = python -c "import aistudio; print(aistudio.APP_VERSION)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          $notes = (git log -1 --pretty=%s)
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+
+      - name: Unit tests
+        run: |
+          python -m pytest -q -rA 2>&1 | Tee-Object -FilePath pytest-output.txt
+          if ($LASTEXITCODE -ne 0) { throw "Unit tests failed" }
+
+      - name: Are the AI models still downloadable?
+        run: |
+          python tools/check_models.py 2>&1 | Tee-Object -FilePath models-check.txt
+          if ($LASTEXITCODE -ne 0) { throw "a model can't be downloaded in the right format" }
+
+      - name: Prepare a private copy of Python (+ pip) for the app
+        run: |
+          $v = $env:PY_EMBED_VERSION
+          New-Item -ItemType Directory -Force build\python, build\app | Out-Null
+          Invoke-WebRequest "https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip" -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath build\python -Force
+          $pth = Get-ChildItem build\python\python3*._pth | Select-Object -First 1
+          $zip = (Get-ChildItem build\python\python3*.zip | Select-Object -First 1).Name
+          Set-Content -Path $pth.FullName -Encoding ascii -Value @($zip, ".", "Lib\site-packages", "..\app", "import site")
+          Get-Content $pth.FullName
+          Invoke-WebRequest "https://bootstrap.pypa.io/get-pip.py" -OutFile get-pip.py
+          & build\python\python.exe get-pip.py --no-warn-script-location
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+          & build\python\python.exe -m pip --version
+          Copy-Item -Recurse aistudio build\app\aistudio
+          Get-ChildItem build -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+
+      - name: Self-test (build folder)
+        run: |
+          & build\python\python.exe -m aistudio --self-test "$PWD\selftest-build.txt"
+          if ($LASTEXITCODE -ne 0) { Get-Content selftest-build.txt; throw "self-test failed" }
+
+      - name: Build installer (Inno Setup)
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $default = "${env:ProgramFiles(x86)}\Inno Setup 6"
+            if (Test-Path "$default\ISCC.exe") { $env:PATH += ";$default" }
+            else { choco install innosetup -y --no-progress; $env:PATH += ";$default" }
+          }
+          iscc /DMyAppVersion=${{ steps.ver.outputs.version }} installer\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
+          Get-ChildItem Output | Format-Table Name, Length
+
+      - name: Test silent install
+        run: |
+          $setup = Get-ChildItem Output\AIImageStudio-Setup-*.exe | Select-Object -First 1
+          $p = Start-Process $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru
+          if (-not $p.WaitForExit(300000)) { throw "installer did not finish" }
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          if (-not (Test-Path "$dir\python\pythonw.exe")) { throw "install failed" }
+          if (-not (Test-Path "$dir\unins000.exe")) { throw "no uninstaller - the Update button would not work" }
+          Push-Location "$dir\app"
+          & "$dir\python\python.exe" -m aistudio --self-test "$env:GITHUB_WORKSPACE\selftest-installed.txt"
+          $code = $LASTEXITCODE
+          Pop-Location
+          Get-Content selftest-installed.txt
+          if ($code -ne 0) { throw "installed app self-test failed" }
+          if (-not (Select-String -Path selftest-installed.txt -SimpleMatch "mode=installed")) { throw "app doesn't know it's installed (updates wouldn't work)" }
+
+      - name: Install the AI engine (processor version - build machines have no graphics card)
+        timeout-minutes: 20
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          & "$dir\python\python.exe" -m aistudio --install-engine --cpu 2>&1 | Tee-Object -FilePath ci-engine.txt
+          if ($LASTEXITCODE -ne 0) { throw "engine install failed" }
+
+      - name: Draw a test picture with a tiny test model (checks the drawing code really works)
+        timeout-minutes: 15
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          & "$dir\python\python.exe" -m aistudio --gen-test hf-internal-testing/tiny-stable-diffusion-xl-pipe "$PWD\ci-test-picture.png" 2>&1 | Tee-Object -FilePath ci-gen.txt
+          if ($LASTEXITCODE -ne 0) { throw "drawing test failed" }
+          if (-not (Test-Path ci-test-picture.png)) { throw "no picture was made" }
+
+      - name: Picture of the app window
+        continue-on-error: true
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $app = Start-Process "$dir\python\python.exe" -ArgumentList "-m","aistudio","--no-browser" -WorkingDirectory "$dir\app" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 6
+          $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          if (-not (Test-Path $edge)) { $edge = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe" }
+          $u = "$env:RUNNER_TEMP\edge-shot"
+          & $edge --headless=new --disable-gpu --hide-scrollbars --user-data-dir=$u --window-size=1400,900 --virtual-time-budget=6000 "--screenshot=$PWD\window.png" "http://127.0.0.1:7865/"
+          Start-Sleep -Seconds 8
+          Stop-Process $app -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path window.png)) { throw "no screenshot" }
+
+      - name: Test an in-app style update (engine must survive, app restarts)
+        timeout-minutes: 8
+        run: |
+          $setup = Get-ChildItem Output\AIImageStudio-Setup-*.exe | Select-Object -First 1
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $app = Start-Process "$dir\python\pythonw.exe" -ArgumentList "-m","aistudio","--no-browser" -WorkingDirectory "$dir\app" -PassThru
+          Start-Sleep -Seconds 6
+          # exactly what the Update button runs
+          $p = Start-Process $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CLOSEAPPLICATIONS","/FORCECLOSEAPPLICATIONS","/RESTARTAPP=1" -PassThru
+          if (-not $p.WaitForExit(300000)) { throw "update install did not finish" }
+          "installer exit code: $($p.ExitCode)"
+          Start-Sleep -Seconds 10
+          $running = Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$dir\*" }
+          "app running again after update: $([bool]$running)"
+          & "$dir\python\python.exe" -c "import torch, diffusers; print('engine still installed after update: torch', torch.__version__, 'diffusers', diffusers.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "the update deleted the AI engine" }
+          $running | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not $running) { throw "app did not restart after the update" }
+
+      - name: Collect the app's log
+        if: always()
+        run: Copy-Item "$env:LOCALAPPDATA\AIImageStudio\app.log" app.log -ErrorAction SilentlyContinue
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            selftest-*.txt
+            pytest-output.txt
+            models-check.txt
+            ci-*.txt
+            ci-test-picture.png
+            window.png
+            app.log
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: AI Image Studio ${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: |
+            Output/AIImageStudio-Setup-*.exe
+            window.png
+          body: |
+            **Download `AIImageStudio-Setup-${{ steps.ver.outputs.version }}.exe`** and double-click it.
+            If Windows says "Windows protected your PC", click **More info → Run anyway** (the app isn't paid-signed).
+            **Already have AI Image Studio?** Just click "Check for updates" at the bottom of the app.
+            No admin rights needed.
+
+            What's new: ${{ steps.ver.outputs.notes }}

@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Image Studio</title>
+<link rel="icon" href="/icon.png">
+<style>
+  :root {
+    --bg: #0d0d12; --panel: #16161e; --panel2: #1e1e29; --line: #2b2b3a; --text: #ececf3;
+    --muted: #9a9ab0; --a: #F97316; --b: #EC4899; --ok: #22c55e; --bad: #ef4444;
+    --grad: linear-gradient(135deg, var(--a), var(--b));
+    --r: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  a { color: var(--a); }
+  .hidden { display: none !important; }
+
+  header { display: flex; align-items: center; gap: 18px; padding: 12px 20px; border-bottom: 1px solid var(--line);
+    background: #101017; position: sticky; top: 0; z-index: 5; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+  .logo .dot { width: 26px; height: 26px; border-radius: 8px; background: var(--grad);
+    box-shadow: 0 0 18px rgba(236,72,153,.45); }
+  nav { display: flex; gap: 4px; }
+  nav button { background: none; border: 0; padding: 8px 14px; border-radius: 10px; color: var(--muted); cursor: pointer; }
+  nav button:hover { color: var(--text); background: var(--panel); }
+  nav button.on { color: var(--text); background: var(--panel2); }
+  .spacer { flex: 1; }
+  .pill { font-size: 12px; color: var(--muted); padding: 4px 10px; border: 1px solid var(--line); border-radius: 99px; }
+  .pill.go { color: #fff; border: 0; background: var(--grad); cursor: pointer; }
+
+  main { padding: 20px; max-width: 1500px; margin: 0 auto; }
+  .btn { border: 1px solid var(--line); background: var(--panel2); padding: 9px 16px; border-radius: 10px; cursor: pointer; }
+  .btn:hover { border-color: #44445a; }
+  .btn.primary { background: var(--grad); border: 0; color: #fff; font-weight: 600; }
+  .btn.primary:disabled { opacity: .45; cursor: default; }
+  .btn.danger { color: #fca5a5; }
+  .btn.small { padding: 6px 10px; font-size: 13px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; }
+  .muted { color: var(--muted); }
+  .err { color: #fca5a5; white-space: pre-wrap; }
+  h2 { margin: 0 0 6px; font-size: 18px; }
+  h3 { margin: 0 0 4px; font-size: 15px; }
+  .bar { height: 10px; background: var(--panel2); border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--grad); transition: width .4s; }
+  .log { font: 12px/1.4 Consolas, monospace; color: var(--muted); background: #0b0b10; border-radius: 10px;
+    padding: 10px; max-height: 150px; overflow: auto; white-space: pre-wrap; margin-top: 10px; }
+
+  /* create */
+  .create { display: grid; grid-template-columns: 380px 1fr; gap: 20px; align-items: start; }
+  .controls { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 76px; }
+  label.f { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+  textarea, input[type=text], input[type=number], select {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; outline: none; }
+  textarea:focus, input:focus, select:focus { border-color: var(--b); }
+  #prompt { min-height: 120px; resize: vertical; color: var(--text); font-size: 15px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .row select { width: 100%; min-width: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 6px 11px; border-radius: 99px; border: 1px solid var(--line); background: var(--panel2);
+    cursor: pointer; font-size: 13px; color: var(--muted); }
+  .chip.on { color: #fff; border-color: transparent; background: var(--grad); }
+  .count { display: flex; gap: 6px; }
+  .count button { flex: 1; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details[open] summary { margin-bottom: 10px; }
+  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13px; }
+  .toggle input { width: 18px; height: 18px; accent-color: var(--b); }
+  #go { padding: 14px; font-size: 16px; }
+  .hint { font-size: 12px; color: var(--muted); }
+
+  .stage { min-height: 400px; }
+  .progress { margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .grid.big { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+  .tile { position: relative; border-radius: 12px; overflow: hidden; background: var(--panel2); cursor: zoom-in;
+    border: 1px solid var(--line); }
+  .tile img { width: 100%; display: block; aspect-ratio: auto; }
+  .tile .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 22px 10px 8px; font-size: 12px;
+    background: linear-gradient(transparent, rgba(0,0,0,.8)); opacity: 0; transition: opacity .2s;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile:hover .cap { opacity: 1; }
+  .placeholder { aspect-ratio: 1; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line);
+    border-radius: 12px; background: repeating-linear-gradient(45deg, #15151c, #15151c 10px, #181820 10px, #181820 20px); }
+  .empty { text-align: center; padding: 80px 20px; color: var(--muted); }
+  .empty .big { font-size: 46px; margin-bottom: 8px; }
+
+  /* setup + models */
+  .steps { display: grid; gap: 16px; max-width: 900px; margin: 0 auto; }
+  .stepnum { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+    background: var(--grad); color: #fff; font-weight: 700; font-size: 13px; margin-right: 8px; }
+  .done-badge { color: var(--ok); font-weight: 600; }
+  .models { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .model { display: flex; flex-direction: column; gap: 10px; }
+
+  /* lightbox */
+  .lb { position: fixed; inset: 0; background: rgba(5,5,8,.92); z-index: 20; display: grid;
+    grid-template-columns: 1fr 340px; }
+  .lb .pic { display: grid; place-items: center; padding: 20px; min-height: 0; }
+  .lb .pic img { max-width: 100%; max-height: calc(100vh - 40px); border-radius: 10px; }
+  .lb aside { background: var(--panel); border-left: 1px solid var(--line); padding: 20px; overflow: auto;
+    display: flex; flex-direction: column; gap: 12px; }
+  .lb .x { align-self: flex-end; }
+  .kv { font-size: 13px; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 600; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2);
+    border: 1px solid var(--line); padding: 12px 18px; border-radius: 12px; z-index: 30; max-width: 600px; }
+  footer { display: flex; gap: 10px; justify-content: center; padding: 30px 20px; color: var(--muted); font-size: 12px; }
+  @media (max-width: 900px) { .create { grid-template-columns: 1fr; } .controls { position: static; }
+    .lb { grid-template-columns: 1fr; } .lb aside { max-height: 45vh; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><div class="dot"></div>AI Image Studio</div>
+  <nav>
+    <button data-tab="create" class="on">Create</button>
+    <button data-tab="gallery">My pictures</button>
+    <button data-tab="models">Models</button>
+    <button data-tab="setup">Setup</button>
+  </nav>
+  <div class="spacer"></div>
+  <span id="gpuPill" class="pill hidden"></span>
+  <span id="updPill" class="pill go hidden"></span>
+  <span id="verPill" class="pill"></span>
+</header>
+
+<main>
+  <!-- CREATE -->
+  <section id="tab-create">
+    <div class="create">
+      <div class="controls card">
+        <label class="f">What do you want to see?
+          <textarea id="prompt" placeholder="e.g. a giant robot dragon flying over a neon city at night, epic, highly detailed"></textarea>
+        </label>
+        <div>
+          <div class="hint" style="margin-bottom:6px">Style</div>
+          <div class="chips" id="styles"></div>
+        </div>
+        <div class="row">
+          <label class="f">Model <select id="model"></select></label>
+          <label class="f">Size <select id="aspect"></select></label>
+        </div>
+        <div class="row">
+          <label class="f">Quality <select id="quality"></select></label>
+          <label class="f">How many
+            <div class="count" id="count"></div>
+          </label>
+        </div>
+        <details>
+          <summary>More options</summary>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <label class="f">Things you DON'T want in the picture
+              <input type="text" id="negative" placeholder="e.g. people, text, dark colors">
+            </label>
+            <label class="f">Seed (same seed + same prompt = same picture). Empty = random
+              <input type="number" id="seed" min="0" placeholder="random">
+            </label>
+            <label class="toggle"><input type="checkbox" id="safe" checked> Safe mode (avoid nudity and gore)</label>
+          </div>
+        </details>
+        <button class="btn primary" id="go">Generate</button>
+        <div class="hint" id="goHint">Tip: Ctrl + Enter also generates.</div>
+      </div>
+
+      <div class="stage">
+        <div id="jobBox" class="card progress hidden">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:10px">
+            <div id="jobMsg">Working...</div>
+            <button class="btn small" id="stop">Stop</button>
+          </div>
+          <div class="bar"><div id="jobBar"></div></div>
+        </div>
+        <div id="jobErr" class="card err hidden" style="margin-bottom:16px"></div>
+        <div id="current" class="grid big"></div>
+        <div id="recentWrap" class="hidden" style="margin-top:26px">
+          <h3 style="margin-bottom:10px">Recent</h3>
+          <div id="recent" class="grid"></div>
+        </div>
+        <div id="createEmpty" class="empty hidden">
+          <div class="big">🎨</div>
+          <div>Type anything on the left and press <b>Generate</b>.</div>
+          <div class="hint" style="margin-top:6px">No limits - it all runs on your own PC.</div>
+        </div>
+        <div id="needSetup" class="empty hidden">
+          <div class="big">⚙️</div>
+          <div>Almost ready! Finish the one-time setup first.</div>
+          <button class="btn primary" style="margin-top:14px" onclick="showTab('setup')">Go to Setup</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- GALLERY -->
+  <section id="tab-gallery" class="hidden">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <h2 style="margin:0">My pictures</h2><span class="muted" id="galCount"></span>
+      <div class="spacer"></div>
+      <button class="btn small" onclick="post('/api/open-folder')">Open pictures folder</button>
+    </div>
+    <div id="gallery" class="grid"></div>
+    <div id="galEmpty" class="empty hidden"><div class="big">🖼️</div>Nothing yet - go make something!</div>
+  </section>
+
+  <!-- MODELS -->
+  <section id="tab-models" class="hidden">
+    <h2>AI models</h2>
+    <p class="muted" style="margin-top:0">Each model draws in its own style. They download once (about 7 GB each) and then work offline.</p>
+    <div id="models" class="models"></div>
+  </section>
+
+  <!-- SETUP -->
+  <section id="tab-setup" class="hidden">
+    <div class="steps">
+      <div>
+        <h2>One-time setup</h2>
+        <p class="muted" style="margin-top:0">Two downloads, then you can make unlimited pictures. Keep this window open while it downloads.</p>
+      </div>
+      <div class="card" id="step1">
+        <h3><span class="stepnum">1</span>Install the AI engine <span id="s1done" class="done-badge hidden">✓ Done</span></h3>
+        <p class="muted" id="s1text">This is the software that lets your graphics card draw pictures (about 3 GB).</p>
+        <div id="s1go"><button class="btn primary" id="installBtn">Install AI engine</button></div>
+        <div id="s1prog" class="hidden">
+          <div style="margin-bottom:8px" id="s1msg"></div>
+          <div class="bar"><div id="s1bar"></div></div>
+          <div class="log" id="s1log"></div>
+        </div>
+        <div id="s1err" class="err hidden" style="margin-top:10px"></div>
+      </div>
+      <div class="card" id="step2">
+        <h3><span class="stepnum">2</span>Download a model <span id="s2done" class="done-badge hidden">✓ Done</span></h3>
+        <p class="muted">Pick at least one. You can get more later in the Models tab.</p>
+        <div id="setupModels" class="models"></div>
+      </div>
+      <div class="card hidden" id="step3">
+        <h3><span class="stepnum">3</span>You're ready!</h3>
+        <button class="btn primary" onclick="showTab('create')" style="margin-top:8px">Start creating</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <button class="btn small" onclick="post('/api/open-folder')">Open pictures folder</button>
+  <button class="btn small" id="checkUpd">Check for updates</button>
+  <button class="btn small" id="quitBtn">Quit app</button>
+</footer>
+
+<div id="lb" class="lb hidden">
+  <div class="pic"><img id="lbImg" alt=""></div>
+  <aside>
+    <button class="btn small x" onclick="closeLb()">Close ✕</button>
+    <div><div class="hint">Prompt</div><div id="lbPrompt" style="white-space:pre-wrap"></div></div>
+    <div id="lbNeg" class="kv"></div>
+    <div id="lbInfo" class="kv"></div>
+    <button class="btn primary" id="lbReuse">Use these settings</button>
+    <button class="btn" id="lbVary">Make more like this (same prompt, new seeds)</button>
+    <a class="btn" id="lbDl" style="text-align:center;text-decoration:none;color:inherit">Download</a>
+    <button class="btn danger" id="lbDel">Delete</button>
+  </aside>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let S = null;            // last status from the app
+let job = null;          // current job id
+let curCount = 1, curStyle = "none";
+let lbItem = null;
+let offline = 0;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw Object.assign(new Error(data.error || ("HTTP " + r.status)), { data });
+  return data;
+}
+function post(path, body) {
+  return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+}
+function toast(msg, ms = 3500) {
+  const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden");
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add("hidden"), ms);
+}
+function gb(bytes) { return (bytes / 1024 ** 3).toFixed(2) + " GB"; }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---------------------------------------------------------------- tabs
+function showTab(name) {
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
+  document.querySelectorAll("main > section").forEach(s => s.classList.toggle("hidden", s.id !== "tab-" + name));
+  if (name === "gallery") loadGallery();
+  if (name === "create") loadRecent();
+}
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+// ---------------------------------------------------------------- status
+let filled = false;
+async function refresh() {
+  try {
+    S = await api("/api/status");
+    offline = 0;
+  } catch (e) {
+    offline++;
+    if (offline > 2) $("#verPill").textContent = "App closed or updating...";
+    return;
+  }
+  const ready = S.engine.installed && S.models.some(m => m.ready);
+  $("#verPill").textContent = "v" + S.app.version;
+  if (S.generator.gpu) { $("#gpuPill").textContent = S.generator.gpu + (S.generator.offload ? " · low-memory mode" : ""); $("#gpuPill").classList.remove("hidden"); }
+  else if (S.engine.gpus && S.engine.gpus.length) { $("#gpuPill").textContent = S.engine.gpus[0]; $("#gpuPill").classList.remove("hidden"); }
+  if (!filled) { fillControls(); filled = true; if (!ready) showTab("setup"); }
+  renderSetup(); renderModels(); renderUpdate();
+  fillModelSelect();
+  $("#needSetup").classList.toggle("hidden", ready);
+  $("#go").disabled = !ready || !!job;
+  if (!ready) { $("#createEmpty").classList.add("hidden"); }
+}
+
+function fillControls() {
+  const st = S.settings, ch = S.choices;
+  $("#styles").innerHTML = Object.entries(ch.styles).map(([k, v]) =>
+    `<button class="chip" data-style="${k}">${esc(v)}</button>`).join("");
+  document.querySelectorAll(".chip").forEach(c => c.onclick = () => setStyle(c.dataset.style));
+  setStyle(st.style || "none");
+  $("#aspect").innerHTML = Object.entries(ch.aspects).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+  $("#aspect").value = st.aspect;
+  $("#quality").innerHTML = Object.entries(ch.quality).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+  $("#quality").value = st.quality;
+  $("#count").innerHTML = [1, 2, 3, 4].map(n => `<button class="btn small" data-n="${n}">${n}</button>`).join("");
+  document.querySelectorAll("#count button").forEach(b => b.onclick = () => setCount(+b.dataset.n));
+  setCount(st.count || 1);
+  $("#negative").value = st.negative || "";
+  $("#safe").checked = st.safe_mode !== false;
+  fillModelSelect(true);
+}
+function fillModelSelect(force) {
+  const sel = $("#model"), cur = sel.value || S.settings.model;
+  const html = S.models.map(m => `<option value="${m.id}" ${m.ready ? "" : "disabled"}>${esc(m.name)}${m.ready ? "" : " (not downloaded)"}</option>`).join("");
+  if (force || sel.dataset.h !== html) {
+    sel.innerHTML = html; sel.dataset.h = html;
+    const ok = S.models.find(m => m.id === cur && m.ready) || S.models.find(m => m.ready);
+    if (ok) sel.value = ok.id;
+  }
+}
+function setStyle(k) { curStyle = k; document.querySelectorAll(".chip").forEach(c => c.classList.toggle("on", c.dataset.style === k)); }
+function setCount(n) { curCount = n; document.querySelectorAll("#count button").forEach(b => b.classList.toggle("primary", +b.dataset.n === n)); }
+
+// ---------------------------------------------------------------- setup + models
+function renderSetup() {
+  const e = S.engine;
+  $("#s1done").classList.toggle("hidden", !e.installed);
+  $("#s1go").classList.toggle("hidden", e.installed || e.active);
+  $("#s1prog").classList.toggle("hidden", !e.active);
+  $("#s1err").classList.toggle("hidden", !e.error);
+  $("#s1err").textContent = e.error ? "Something went wrong:\n" + e.error + "\n\nCheck your internet and press the button to try again." : "";
+  if (e.error) $("#installBtn").textContent = "Try again";
+  if (e.active) {
+    $("#s1msg").textContent = e.message;
+    $("#s1bar").style.width = (e.progress * 100).toFixed(1) + "%";
+    $("#s1log").textContent = e.log.join("\n");
+  }
+  if (e.installed) $("#s1text").textContent = "Installed. Your graphics card is ready to draw.";
+  else if (e.nvidia === false) $("#s1text").textContent = "No NVIDIA graphics card was found, so the app will use your processor. That works, but each picture can take several minutes.";
+  else if (e.gpus && e.gpus.length) $("#s1text").textContent = `Found your ${e.gpus[0].split(",")[0]}. This installs the software that lets it draw pictures (about 3 GB).`;
+  const anyReady = S.models.some(m => m.ready);
+  $("#s2done").classList.toggle("hidden", !anyReady);
+  $("#step3").classList.toggle("hidden", !(e.installed && anyReady));
+}
+function modelCard(m) {
+  const d = m.download || {};
+  let action;
+  if (m.ready) action = `<div style="display:flex;gap:8px;align-items:center"><span class="done-badge">✓ Downloaded</span><div class="spacer"></div><button class="btn small danger" data-del="${m.id}">Remove</button></div>`;
+  else if (d.active) {
+    const pct = d.total ? (d.done / d.total * 100) : 0;
+    action = `<div class="muted" style="font-size:13px">${esc(d.message)} ${d.total ? gb(d.done) + " of " + gb(d.total) : ""}</div><div class="bar"><div style="width:${pct.toFixed(1)}%"></div></div>`;
+  } else {
+    const dis = S.engine.installed ? "" : "disabled title='Install the AI engine first'";
+    action = `<button class="btn primary" data-dl="${m.id}" ${dis}>Download (~${m.approx_gb} GB)</button>` +
+      (d.error ? `<div class="err" style="font-size:13px">Download failed: ${esc(d.error)}</div>` : "");
+  }
+  return `<div class="card model"><div><h3>${esc(m.name)}</h3><div class="muted">${esc(m.about)}</div></div>${action}</div>`;
+}
+function renderModels() {
+  const html = S.models.map(modelCard).join("");
+  for (const id of ["#models", "#setupModels"]) if ($(id).dataset.h !== html) { $(id).innerHTML = html; $(id).dataset.h = html; }
+  document.querySelectorAll("[data-dl]").forEach(b => b.onclick = async () => {
+    try { await post("/api/download-model", { id: b.dataset.dl }); refresh(); } catch (e) { toast(e.message); }
+  });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => askDelete(b));
+}
+function askDelete(b) {
+  if (b.dataset.sure) { post("/api/delete-model", { id: b.dataset.del }).then(refresh); return; }
+  b.dataset.sure = "1"; b.textContent = "Click again to remove";
+  setTimeout(() => { delete b.dataset.sure; b.textContent = "Remove"; }, 3000);
+}
+$("#installBtn").onclick = async () => { await post("/api/install-engine"); refresh(); };
+
+// ---------------------------------------------------------------- updates
+function renderUpdate() {
+  const u = S.update, p = $("#updPill");
+  if (u.downloading) { p.textContent = `Updating... ${Math.round(u.progress * 100)}%`; p.classList.remove("hidden"); }
+  else if (u.available) { p.textContent = `Update to v${u.available.version}`; p.classList.remove("hidden"); p.title = u.available.notes || ""; }
+  else p.classList.add("hidden");
+}
+$("#updPill").onclick = async () => {
+  if (!S.update.available || S.update.downloading) return;
+  if (job) { toast("Wait for the current pictures to finish first."); return; }
+  await post("/api/update/install");
+  toast("Downloading the update. The app will restart by itself in a moment...", 15000);
+  waitForRestart();
+};
+$("#checkUpd").onclick = async () => {
+  await post("/api/update/check");
+  toast("Checking...");
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 700));
+    await refresh();
+    if (S && !S.update.checking && S.update.checked) break;
+  }
+  if (S.update.error) toast("Couldn't check: " + S.update.error);
+  else if (S.update.available) toast(`Version ${S.update.available.version} is ready - click the button at the top right to update.`, 6000);
+  else toast("You have the newest version.");
+};
+async function waitForRestart() {
+  const old = S.app.version;
+  for (let i = 0; i < 180; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    try { const s = await api("/api/status"); if (s.app.version !== old) { location.reload(); return; } } catch (e) {}
+  }
+}
+$("#quitBtn").onclick = async () => {
+  if (job && !confirmQuit()) return;
+  try { await post("/api/quit"); } catch (e) {}
+  document.body.innerHTML = '<div class="empty"><div class="big">👋</div>AI Image Studio is closed. You can close this window.</div>';
+};
+function confirmQuit() { toast("Pictures are still being made - press Quit again to stop them."); confirmQuit = () => true; return false; }
+
+// ---------------------------------------------------------------- generate
+async function generate(extra) {
+  const prompt = $("#prompt").value.trim();
+  if (!prompt) { $("#prompt").focus(); toast("Type what you want to see first."); return; }
+  if (job) return;
+  const body = Object.assign({
+    prompt, model: $("#model").value, aspect: $("#aspect").value, quality: $("#quality").value,
+    style: curStyle, count: curCount, negative: $("#negative").value, seed: $("#seed").value,
+    safe_mode: $("#safe").checked,
+  }, extra || {});
+  $("#jobErr").classList.add("hidden");
+  try {
+    const r = await post("/api/generate", body);
+    job = r.job.id;
+    $("#go").disabled = true;
+    $("#current").innerHTML = Array.from({ length: body.count }, () => `<div class="placeholder">waiting...</div>`).join("");
+    $("#createEmpty").classList.add("hidden");
+    $("#jobBox").classList.remove("hidden");
+    pollJob(body.count);
+  } catch (e) {
+    $("#jobErr").textContent = e.message; $("#jobErr").classList.remove("hidden");
+  }
+}
+async function pollJob(count) {
+  let shown = 0;
+  while (job) {
+    let j;
+    try { j = await api("/api/job/" + job); } catch (e) { await new Promise(r => setTimeout(r, 1000)); continue; }
+    $("#jobMsg").textContent = j.message + (j.state === "running" ? `  (step ${j.step} of ${j.steps})` : "");
+    const frac = j.state === "running" ? (j.image_index + j.step / j.steps) / j.count : 0;
+    $("#jobBar").style.width = (frac * 100).toFixed(1) + "%";
+    if (j.images.length > shown) {
+      const tiles = $("#current").children;
+      for (let i = shown; i < j.images.length; i++) if (tiles[i]) tiles[i].outerHTML = tileHtml(j.images[i]);
+      shown = j.images.length; bindTiles($("#current"), j.images);
+    }
+    const ph = $("#current").querySelector(".placeholder");
+    if (ph && j.state === "running") ph.textContent = `drawing... ${Math.round(j.step / j.steps * 100)}%`;
+    if (["done", "error", "cancelled", "missing"].includes(j.state)) {
+      job = null;
+      $("#jobBox").classList.add("hidden");
+      $("#current").querySelectorAll(".placeholder").forEach(p => p.remove());
+      if (j.state === "error") { $("#jobErr").textContent = j.error; $("#jobErr").classList.remove("hidden"); }
+      refresh(); loadRecent();
+      break;
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+$("#go").onclick = () => generate();
+$("#stop").onclick = () => job && post("/api/cancel", { id: job });
+$("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); } });
+
+// ---------------------------------------------------------------- pictures
+function tileHtml(it) {
+  return `<div class="tile" data-file="${esc(it.file)}"><img loading="lazy" src="/images/${encodeURIComponent(it.file)}" alt=""><div class="cap">${esc(it.prompt)}</div></div>`;
+}
+function bindTiles(root, items) {
+  const map = Object.fromEntries(items.map(i => [i.file, i]));
+  root.querySelectorAll(".tile").forEach(t => t.onclick = () => openLb(map[t.dataset.file] || null));
+}
+async function loadRecent() {
+  try {
+    const { items } = await api("/api/gallery");
+    const recent = items.slice(0, 12);
+    $("#recent").innerHTML = recent.map(tileHtml).join("");
+    bindTiles($("#recent"), recent);
+    $("#recentWrap").classList.toggle("hidden", !recent.length);
+    const ready = S && S.engine.installed && S.models.some(m => m.ready);
+    $("#createEmpty").classList.toggle("hidden", !!(recent.length || job || !ready || $("#current").children.length));
+  } catch (e) {}
+}
+async function loadGallery() {
+  const { items } = await api("/api/gallery");
+  $("#gallery").innerHTML = items.map(tileHtml).join("");
+  bindTiles($("#gallery"), items);
+  $("#galEmpty").classList.toggle("hidden", items.length > 0);
+  $("#galCount").textContent = items.length ? `${items.length} pictures` : "";
+}
+function openLb(it) {
+  if (!it) return;
+  lbItem = it;
+  $("#lbImg").src = "/images/" + encodeURIComponent(it.file);
+  $("#lbPrompt").textContent = it.prompt;
+  $("#lbNeg").innerHTML = it.negative ? `<b>Not wanted:</b> ${esc(it.negative)}` : "";
+  const m = S && S.models.find(x => x.id === it.model);
+  $("#lbInfo").innerHTML = `<b>Model:</b> ${esc(m ? m.name : it.model)}<br><b>Style:</b> ${esc(S ? S.choices.styles[it.style] || it.style : it.style)}<br>` +
+    `<b>Size:</b> ${it.width}×${it.height}<br><b>Seed:</b> ${it.seed}<br><b>Steps:</b> ${it.steps}` + (it.seconds ? `<br><b>Took:</b> ${it.seconds}s` : "");
+  $("#lbDl").href = "/images/" + encodeURIComponent(it.file) + "?download=1";
+  $("#lbDl").setAttribute("download", it.file);
+  $("#lbDel").textContent = "Delete"; delete $("#lbDel").dataset.sure;
+  $("#lb").classList.remove("hidden");
+}
+function closeLb() { $("#lb").classList.add("hidden"); lbItem = null; }
+function applySettings(it, keepSeed) {
+  $("#prompt").value = it.prompt; $("#negative").value = it.negative || "";
+  if ($("#model").querySelector(`option[value="${it.model}"]:not([disabled])`)) $("#model").value = it.model;
+  if (it.aspect) $("#aspect").value = it.aspect;
+  if (it.quality) $("#quality").value = it.quality;
+  setStyle(it.style || "none");
+  $("#seed").value = keepSeed ? it.seed : "";
+  if (keepSeed) $("#seed").closest("details").open = true;
+}
+$("#lbReuse").onclick = () => { applySettings(lbItem, true); closeLb(); showTab("create"); toast("Settings loaded - press Generate (same seed gives the same picture)."); };
+$("#lbVary").onclick = () => { applySettings(lbItem, false); closeLb(); showTab("create"); generate(); };
+$("#lbDel").onclick = async () => {
+  const b = $("#lbDel");
+  if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Click again to delete forever"; return; }
+  const file = lbItem.file;
+  await post("/api/delete-image", { file });
+  closeLb(); loadGallery(); loadRecent();
+  $("#current").querySelectorAll(".tile").forEach(t => { if (t.dataset.file === file) t.remove(); });
+};
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeLb(); });
+$("#lb").addEventListener("click", e => { if (e.target.classList.contains("pic")) closeLb(); });
+
+// ---------------------------------------------------------------- loops
+setInterval(() => post("/api/ping").catch(() => {}), 5000);
+post("/api/ping").catch(() => {});
+(async function loop() {
+  await refresh();
+  const busy = S && (S.engine.active || S.models.some(m => m.download && m.download.active) || S.update.downloading);
+  setTimeout(loop, busy ? 1000 : 4000);
+})();
+loadRecent();
+</script>
+</body>
+</html>
