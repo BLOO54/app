@@ -139,7 +139,8 @@ jobs:
           $r = Get-Content ci-download-style.json -Raw | ConvertFrom-Json
           if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "add-on download failed: $($r.error)" }
 
-      - name: Real pictures with Juggernaut XL - normal, copy art style, remix (small + few steps, on the processor)
+      - name: Real pictures with Juggernaut XL - normal, copy art style, remix (only when asked - slow, on the processor)
+        if: contains(github.event.head_commit.message, '[full-test]') || github.event_name == 'workflow_dispatch'
         timeout-minutes: 40
         env:
           AISTUDIO_CPU_DTYPE: bf16
