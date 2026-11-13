@@ -81,6 +81,19 @@
     color: var(--muted); font-size: 12.5px; }
   .seg button.on { background: var(--grad); color: #fff; }
   input[type=range] { width: 100%; accent-color: var(--b); }
+  .ustyles { display: flex; flex-wrap: wrap; gap: 6px; }
+  .uchip { display: flex; align-items: center; gap: 7px; padding: 4px 10px 4px 4px; border-radius: 99px;
+    border: 1px solid var(--line); background: var(--panel2); cursor: pointer; font-size: 13px; color: var(--muted); }
+  .uchip img, .uchip .ph { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--grad); }
+  .uchip.on { color: #fff; border-color: transparent; background: var(--grad); }
+  .tgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; margin-top: 10px; }
+  .tthumb { position: relative; aspect-ratio: 1; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+  .tthumb img { width: 100%; height: 100%; object-fit: cover; }
+  .tthumb button { position: absolute; top: 4px; right: 4px; border: 0; border-radius: 50%; width: 22px; height: 22px;
+    background: rgba(0,0,0,.7); color: #fff; cursor: pointer; font-size: 12px; }
+  .stylecard { display: flex; gap: 12px; align-items: center; }
+  .stylecard .th { width: 64px; height: 64px; border-radius: 12px; object-fit: cover; background: var(--grad); flex: none; }
+  code.trig { background: #0b0b10; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #fdba74; }
   .note { font-size: 12.5px; background: #24180f; border: 1px solid #4a2f17; color: #fdba74; border-radius: 10px; padding: 8px 10px; }
   .hint { font-size: 12px; color: var(--muted); }
 
@@ -95,6 +108,10 @@
     background: linear-gradient(transparent, rgba(0,0,0,.8)); opacity: 0; transition: opacity .2s;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tile:hover .cap { opacity: 1; }
+  .placeholder.live { position: relative; overflow: hidden; padding: 0; border-style: solid; }
+  .placeholder.live img { width: 100%; height: 100%; object-fit: cover; image-rendering: auto; filter: saturate(1.1); }
+  .placeholder.live .lab { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.65); color: #fff;
+    padding: 3px 9px; border-radius: 99px; font-size: 12px; }
   .placeholder { aspect-ratio: 1; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--line);
     border-radius: 12px; background: repeating-linear-gradient(45deg, #15151c, #15151c 10px, #181820 10px, #181820 20px); }
   .empty { text-align: center; padding: 80px 20px; color: var(--muted); }
@@ -131,6 +148,7 @@
   <nav>
     <button data-tab="create" class="on">Create</button>
     <button data-tab="gallery">My pictures</button>
+    <button data-tab="train">Train</button>
     <button data-tab="models">Models</button>
     <button data-tab="setup">Setup</button>
   </nav>
@@ -177,6 +195,13 @@
         <div>
           <div class="hint" style="margin-bottom:6px">Style</div>
           <div class="chips" id="styles"></div>
+        </div>
+        <div id="myStylesWrap" class="hidden">
+          <div class="hint" style="margin-bottom:6px">My styles</div>
+          <div class="ustyles" id="myStyles"></div>
+          <label class="f hidden" id="usStrengthWrap" style="gap:2px;margin-top:8px"><span>Style strength <span id="usVal">80%</span></span>
+            <input type="range" id="usStrength" min="10" max="150" value="80">
+          </label>
         </div>
         <div class="row">
           <label class="f">Model <select id="model"></select></label>
@@ -259,6 +284,70 @@
     </div>
     <div id="gallery" class="grid"></div>
     <div id="galEmpty" class="empty hidden"><div class="big">🖼️</div>Nothing yet - go make something!</div>
+  </section>
+
+  <!-- TRAIN -->
+  <section id="tab-train" class="hidden">
+    <div class="steps">
+      <div>
+        <h2>Teach the AI a style</h2>
+        <p class="muted" style="margin-top:0">Give it pictures that share one art style. Your graphics card learns the style, and then you can use it on anything.</p>
+      </div>
+      <div class="card" id="trainProg" style="display:none">
+        <h3 id="tpName">Training...</h3>
+        <div style="margin:8px 0" id="tpMsg"></div>
+        <div class="bar"><div id="tpBar"></div></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <span class="hint" id="tpInfo"></span>
+          <button class="btn small" id="tpStop">Stop</button>
+        </div>
+        <div id="tpErr" class="err hidden" style="margin-top:10px"></div>
+      </div>
+      <div class="card" id="trainForm">
+        <label class="f">1. Name your style
+          <input type="text" id="tName" maxlength="40" placeholder="e.g. My Roblox art">
+        </label>
+        <div style="margin-top:14px">
+          <div class="hint" style="margin-bottom:6px">2. Add pictures in that style (10-30 is best, at least 3)</div>
+          <div id="tDrop" class="drop">🖼️ Click to choose pictures, or drag them here</div>
+          <input type="file" id="tFiles" accept="image/*" multiple class="hidden">
+          <div class="tgrid" id="tGrid"></div>
+          <div class="hint" id="tCount" style="margin-top:6px"></div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <label class="f">3. Based on model <select id="tModel"></select></label>
+          <label class="f">4. How long
+            <select id="tLength">
+              <option value="quick">Quick (~15-20 min)</option>
+              <option value="normal" selected>Normal (~30-40 min)</option>
+              <option value="thorough">Thorough (~50-70 min)</option>
+            </select>
+          </label>
+        </div>
+        <button class="btn primary" id="tStart" style="margin-top:16px;width:100%;padding:13px">Start training</button>
+        <div class="hint" style="margin-top:10px">
+          Tips: use pictures that all have the same style but show <b>different</b> things (characters, places, objects).
+          The middle square of each picture is used. Close games and heavy apps while it trains. You can't make pictures during training.
+        </div>
+      </div>
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:10px">
+          <h3 style="margin:0">My styles</h3><div class="spacer"></div>
+          <button class="btn small" id="impBtn">Import a style pack file</button>
+        </div>
+        <div id="impBox" class="hidden" style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+          <div class="hint">Style packs (LoRA files, ending in <b>.safetensors</b>) for <b>SDXL</b> can be downloaded from model sites. If the page lists "trigger words", copy them here.</div>
+          <div class="row">
+            <input type="text" id="impName" placeholder="Name, e.g. Low-poly 3D">
+            <input type="text" id="impTrig" placeholder="Trigger words (optional)">
+          </div>
+          <input type="file" id="impFile" accept=".safetensors">
+          <div id="impMsg" class="hint"></div>
+        </div>
+        <div id="styleList" style="display:flex;flex-direction:column;gap:12px;margin-top:14px"></div>
+        <div id="styleEmpty" class="muted hidden" style="margin-top:10px">No styles yet. Train one above or import a file.</div>
+      </div>
+    </div>
   </section>
 
   <!-- MODELS -->
@@ -386,7 +475,7 @@ async function refresh() {
   }
   else if (S.engine.gpus && S.engine.gpus.length) { $("#gpuPill").textContent = S.engine.gpus[0]; $("#gpuPill").classList.remove("hidden"); }
   if (!filled) { fillControls(); filled = true; if (!ready) showTab("setup"); }
-  renderSetup(); renderModels(); renderUpdate();
+  renderSetup(); renderModels(); renderUpdate(); renderMyStyles(); renderTraining();
   fillModelSelect();
   $("#needSetup").classList.toggle("hidden", ready);
   $("#go").disabled = !ready || !!job;
@@ -524,7 +613,8 @@ async function generate(extra) {
     prompt, model: $("#model").value, aspect: $("#aspect").value, quality: $("#quality").value,
     style: curStyle, count: curCount, negative: $("#negative").value, seed: $("#seed").value,
     safe_mode: $("#safe").checked,
-  }, refData ? { ref_image: refData, ref_mode: refMode, ref_strength: +$("#refStrength").value / 100 } : {}, extra || {});
+  }, curUserStyle ? { user_style: curUserStyle, user_style_strength: +$("#usStrength").value / 100 } : {},
+  refData ? { ref_image: refData, ref_mode: refMode, ref_strength: +$("#refStrength").value / 100 } : {}, extra || {});
   if (refData && refMode === "style" && !styleReady()) { toast("Download the Style copier first (see the orange box)."); return; }
   if (body.quality === "turbo" && !speedReady()) { toast("Download the Speed pack first (see the orange box)."); return; }
   $("#jobErr").classList.add("hidden");
@@ -540,8 +630,11 @@ async function generate(extra) {
     $("#jobErr").textContent = e.message; $("#jobErr").classList.remove("hidden");
   }
 }
+let lastPreview = 0, curAspect = "1";
 async function pollJob(count) {
-  let shown = 0;
+  let shown = 0; lastPreview = 0;
+  const asp = (S.choices.aspects[$("#aspect").value] || "").match(/(\d+)x(\d+)/);
+  curAspect = asp ? `${asp[1]} / ${asp[2]}` : "1";
   while (job) {
     let j;
     try { j = await api("/api/job/" + job); } catch (e) { await new Promise(r => setTimeout(r, 1000)); continue; }
@@ -554,7 +647,19 @@ async function pollJob(count) {
       shown = j.images.length; bindTiles($("#current"), j.images);
     }
     const ph = $("#current").querySelector(".placeholder");
-    if (ph && j.state === "running") ph.textContent = `drawing... ${Math.round(j.step / j.steps * 100)}%`;
+    if (ph) {
+      ph.style.aspectRatio = curAspect;
+      if (j.state === "running" && j.preview && j.preview !== lastPreview && j.step > 0) {
+        lastPreview = j.preview;
+        if (!ph.classList.contains("live")) { ph.classList.add("live"); ph.innerHTML = `<img alt=""><span class="lab"></span>`; }
+        const im = new Image();
+        im.onload = () => { const t = ph.querySelector("img"); if (t) t.src = im.src; };
+        im.src = `/api/job/${job}/preview.jpg?n=${j.preview}`;
+      }
+      const lab = ph.querySelector(".lab");
+      const txt = j.state === "loading" ? "loading the model..." : j.step >= j.steps ? "finishing..." : j.state === "running" ? `step ${j.step} of ${j.steps}` : "waiting...";
+      if (lab) lab.textContent = txt; else ph.textContent = txt;
+    }
     if (["done", "error", "cancelled", "missing"].includes(j.state)) {
       job = null;
       $("#jobBox").classList.add("hidden");
@@ -563,7 +668,7 @@ async function pollJob(count) {
       refresh(); loadRecent();
       break;
     }
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 250));
   }
 }
 $("#go").onclick = () => generate();
@@ -605,6 +710,7 @@ function openLb(it) {
   const m = S && S.models.find(x => x.id === it.model);
   $("#lbInfo").innerHTML = `<b>Model:</b> ${esc(m ? m.name : it.model)}<br><b>Style:</b> ${esc(S ? S.choices.styles[it.style] || it.style : it.style)}<br>` +
     `<b>Size:</b> ${it.width}×${it.height}<br><b>Seed:</b> ${it.seed}<br><b>Steps:</b> ${it.steps}` + (it.seconds ? `<br><b>Took:</b> ${it.seconds}s` : "") +
+    (it.user_style ? `<br><b>My style:</b> ${esc(((S.styles || []).find(x => x.id === it.user_style) || {}).name || "deleted style")} (${Math.round(it.user_style_strength * 100)}%)` : "") +
     (it.ref_mode ? `<br><b>Reference:</b> ${it.ref_mode === "style" ? "copied art style" : "remixed picture"} (${Math.round(it.ref_strength * 100)}%)` : "");
   $("#lbDl").href = "/images/" + encodeURIComponent(it.file) + "?download=1";
   $("#lbDl").setAttribute("download", it.file);
@@ -618,6 +724,9 @@ function applySettings(it, keepSeed) {
   if (it.aspect) $("#aspect").value = it.aspect;
   if (it.quality) $("#quality").value = it.quality;
   setStyle(it.style || "none");
+  curUserStyle = it.user_style && (S.styles || []).find(x => x.id === it.user_style && x.ready) ? it.user_style : null;
+  if (it.user_style_strength) { $("#usStrength").value = Math.round(it.user_style_strength * 100); $("#usVal").textContent = $("#usStrength").value + "%"; }
+  renderMyStyles();
   $("#seed").value = keepSeed ? it.seed : "";
   if (keepSeed) $("#seed").closest("details").open = true;
 }
@@ -633,6 +742,120 @@ $("#lbDel").onclick = async () => {
 };
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeLb(); });
 $("#lb").addEventListener("click", e => { if (e.target.classList.contains("pic")) closeLb(); });
+
+// ---------------------------------------------------------------- my styles (create tab)
+let curUserStyle = null;
+function renderMyStyles() {
+  const ready = (S.styles || []).filter(x => x.ready);
+  $("#myStylesWrap").classList.toggle("hidden", !ready.length);
+  if (curUserStyle && !ready.find(x => x.id === curUserStyle)) curUserStyle = null;
+  const html = ready.length ? [`<button class="uchip ${curUserStyle ? "" : "on"}" data-us="">None</button>`].concat(ready.map(x =>
+    `<button class="uchip ${curUserStyle === x.id ? "on" : ""}" data-us="${x.id}">${x.has_thumb ? `<img src="/styles/${x.id}/thumb.jpg">` : `<span class="ph"></span>`}${esc(x.name)}</button>`)).join("") : "";
+  if ($("#myStyles").dataset.h !== html) {
+    $("#myStyles").innerHTML = html; $("#myStyles").dataset.h = html;
+    $("#myStyles").querySelectorAll("[data-us]").forEach(b => b.onclick = () => { curUserStyle = b.dataset.us || null; renderMyStyles(); });
+  }
+  $("#usStrengthWrap").classList.toggle("hidden", !curUserStyle);
+}
+$("#usStrength").oninput = e => $("#usVal").textContent = e.target.value + "%";
+
+// ---------------------------------------------------------------- train tab
+let tPics = [];   // data URLs (resized)
+function resizePic(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const short = Math.min(img.width, img.height), k = Math.min(1, 1024 / short);
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      res(c.toDataURL("image/jpeg", 0.92));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("bad image")); };
+    img.src = url;
+  });
+}
+async function addTrainFiles(files) {
+  for (const f of files) {
+    if (!f.type.startsWith("image/")) continue;
+    if (tPics.length >= 60) { toast("60 pictures is the most."); break; }
+    try { tPics.push(await resizePic(f)); } catch (e) {}
+  }
+  renderTrainPics();
+}
+function renderTrainPics() {
+  $("#tGrid").innerHTML = tPics.map((d, i) => `<div class="tthumb"><img src="${d}"><button data-rm="${i}">✕</button></div>`).join("");
+  $("#tGrid").querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { tPics.splice(+b.dataset.rm, 1); renderTrainPics(); });
+  const n = tPics.length;
+  $("#tCount").textContent = n ? `${n} picture${n === 1 ? "" : "s"}` + (n < 3 ? " - add at least 3" : n < 10 ? " - more (10-30) gives better results" : n > 40 ? " - that's plenty" : " - great") : "";
+}
+$("#tDrop").onclick = () => $("#tFiles").click();
+$("#tFiles").onchange = e => { addTrainFiles([...e.target.files]); e.target.value = ""; };
+$("#tDrop").addEventListener("drop", e => { e.preventDefault(); e.stopPropagation(); $("#tDrop").classList.remove("over"); addTrainFiles([...e.dataTransfer.files]); });
+$("#tStart").onclick = async () => {
+  const name = $("#tName").value.trim();
+  if (!name) { $("#tName").focus(); toast("Give your style a name first."); return; }
+  if (tPics.length < 3) { toast("Add at least 3 pictures."); return; }
+  $("#tStart").disabled = true; $("#tStart").textContent = "Starting...";
+  try {
+    await post("/api/train/start", { name, model: $("#tModel").value, length: $("#tLength").value, images: tPics });
+    tPics = []; renderTrainPics(); $("#tName").value = "";
+    toast("Training started! You can watch it here.", 4000);
+    refresh();
+  } catch (e) { toast(e.message, 6000); }
+  $("#tStart").disabled = false; $("#tStart").textContent = "Start training";
+};
+$("#tpStop").onclick = () => post("/api/train/cancel").then(refresh);
+function fmtTime(sec) { if (sec == null) return ""; const m = Math.floor(sec / 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : m ? `${m} min` : `${sec} s`; }
+function renderTraining() {
+  const t = S.training || {};
+  const show = t.active || t.error || t.done;
+  $("#trainProg").style.display = show ? "" : "none";
+  $("#trainForm").style.opacity = t.active ? .45 : 1;
+  $("#tStart").disabled = !!t.active;
+  if (show) {
+    $("#tpName").textContent = (t.active ? "Training: " : "") + (t.name || "your style");
+    $("#tpMsg").textContent = t.message || "";
+    $("#tpBar").style.width = t.steps ? (t.step / t.steps * 100).toFixed(1) + "%" : "0";
+    $("#tpInfo").textContent = t.active ? `Round ${t.step || 0} of ${t.steps}` + (t.eta != null ? ` · about ${fmtTime(t.eta)} left` : "") : "";
+    $("#tpStop").classList.toggle("hidden", !t.active);
+    $("#tpErr").classList.toggle("hidden", !t.error); $("#tpErr").textContent = t.error || "";
+  }
+  const ready = S.models.filter(m => m.ready);
+  const mh = ready.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join("") || `<option value="">(download a model first)</option>`;
+  if ($("#tModel").dataset.h !== mh) { $("#tModel").innerHTML = mh; $("#tModel").dataset.h = mh; }
+  // style list
+  const list = S.styles || [];
+  $("#styleEmpty").classList.toggle("hidden", list.length > 0);
+  const html = list.map(x => `<div class="stylecard">${x.has_thumb ? `<img class="th" src="/styles/${x.id}/thumb.jpg">` : `<div class="th"></div>`}
+    <div style="flex:1;min-width:0"><b>${esc(x.name)}</b> <span class="hint">${x.kind === "imported" ? "imported" : x.ready ? `trained on ${x.pictures || "?"} pictures` : (t.active && t.style_id === x.id ? "training..." : "not finished")}</span>
+    ${x.trigger ? `<div class="hint" style="margin-top:3px">Trigger: <code class="trig">${esc(x.trigger)}</code> (added to your prompt automatically)</div>` : ""}</div>
+    ${x.ready ? `<button class="btn small" data-use="${x.id}">Use</button>` : ""}
+    <button class="btn small danger" data-sdel="${x.id}">Delete</button></div>`).join("");
+  if ($("#styleList").dataset.h !== html) {
+    $("#styleList").innerHTML = html; $("#styleList").dataset.h = html;
+    $("#styleList").querySelectorAll("[data-use]").forEach(b => b.onclick = () => { curUserStyle = b.dataset.use; renderMyStyles(); showTab("create"); toast("Style picked - type a prompt and press Generate."); });
+    $("#styleList").querySelectorAll("[data-sdel]").forEach(b => b.onclick = async () => {
+      if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = "Click again"; setTimeout(() => { delete b.dataset.sure; b.textContent = "Delete"; }, 3000); return; }
+      try { await post("/api/styles/delete", { id: b.dataset.sdel }); refresh(); } catch (e) { toast(e.message); }
+    });
+  }
+}
+$("#impBtn").onclick = () => $("#impBox").classList.toggle("hidden");
+$("#impFile").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const name = $("#impName").value.trim() || f.name.replace(/\.safetensors$/i, "");
+  $("#impMsg").textContent = "Importing...";
+  try {
+    const r = await fetch(`/api/styles/import?name=${encodeURIComponent(name)}&trigger=${encodeURIComponent($("#impTrig").value.trim())}`,
+      { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: f });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Import failed");
+    $("#impMsg").textContent = "Imported!"; $("#impName").value = ""; $("#impTrig").value = ""; e.target.value = "";
+    refresh();
+  } catch (err) { $("#impMsg").textContent = err.message; }
+};
 
 // ---------------------------------------------------------------- reference picture
 function styleReady() { return !!(S && S.addons && S.addons.find(a => a.id === "style" && a.ready)); }
@@ -707,7 +930,10 @@ $("#refStrength").oninput = e => $("#refVal").textContent = e.target.value + "%"
 const drop = $("#refDrop");
 ["dragenter", "dragover"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach(ev => document.addEventListener(ev, e => { e.preventDefault(); if (ev === "drop" || !e.relatedTarget) drop.classList.remove("over"); }));
-document.addEventListener("drop", e => { const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) { showTab("create"); loadRef(f); } });
+document.addEventListener("drop", e => {
+  if (!$("#tab-train").classList.contains("hidden")) { addTrainFiles([...(e.dataTransfer || {}).files || []]); return; }
+  const f = e.dataTransfer && e.dataTransfer.files[0]; if (f) { showTab("create"); loadRef(f); }
+});
 document.addEventListener("paste", e => {
   const item = [...(e.clipboardData || {}).items || []].find(i => i.type.startsWith("image/"));
   if (item) { e.preventDefault(); showTab("create"); loadRef(item.getAsFile()); }
@@ -733,7 +959,8 @@ setInterval(() => post("/api/ping").catch(() => {}), 5000);
 post("/api/ping").catch(() => {});
 (async function loop() {
   await refresh();
-  const busy = S && (S.engine.active || S.models.some(m => m.download && m.download.active) || S.update.downloading);
+  const busy = S && (S.engine.active || S.models.some(m => m.download && m.download.active) || S.update.downloading ||
+    (S.addons || []).some(a => a.download && a.download.active) || (S.training && S.training.active));
   setTimeout(loop, busy ? 1000 : 4000);
 })();
 loadRecent();

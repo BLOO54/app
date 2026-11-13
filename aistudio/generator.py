@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import random
 import threading
@@ -10,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from . import gallery, models, paths, safety, settings, styles
+from . import gallery, models, mystyles, paths, safety, settings, styles
 
 log = logging.getLogger(__name__)
 
@@ -28,12 +29,36 @@ class Job:
     images: list = field(default_factory=list)
     error: str | None = None
     cancel: bool = False
+    preview: bytes | None = None   # small JPEG of the picture as it forms
+    preview_n: int = 0
     created: float = field(default_factory=time.time)
 
     def public(self) -> dict:
         return {"id": self.id, "state": self.state, "message": self.message,
                 "image_index": self.image_index, "count": self.count, "step": self.step,
-                "steps": self.steps, "images": self.images, "error": self.error}
+                "steps": self.steps, "images": self.images, "error": self.error, "preview": self.preview_n}
+
+
+# rough "what does it look like so far" colors for SDXL's 4 hidden channels (no full decode needed)
+_PREVIEW_RGB = [[0.3651, 0.4232, 0.4341], [-0.2533, -0.0042, 0.1068],
+                [0.1076, 0.1111, -0.0362], [-0.3165, -0.2492, -0.2188]]
+_PREVIEW_BIAS = [0.1084, -0.0175, -0.0011]
+
+
+def latent_preview(latents) -> bytes:
+    """Turn the half-finished picture (latents) into a small JPEG, in a few milliseconds."""
+    import io
+
+    import torch
+    from PIL import Image
+    lat = latents[0].float()
+    m = torch.tensor(_PREVIEW_RGB, device=lat.device)
+    b = torch.tensor(_PREVIEW_BIAS, device=lat.device)
+    rgb = torch.einsum("chw,cr->hwr", lat, m) + b
+    arr = ((rgb.clamp(-1, 1) + 1) * 127.5).to(torch.uint8).cpu().numpy()
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, "JPEG", quality=80)
+    return buf.getvalue()
 
 
 class NotAllowed(ValueError):
@@ -80,14 +105,31 @@ def make_job_params(raw: dict) -> dict:
         ref_strength = 0.6
     lo, hi = (0.1, 1.0) if ref_mode == "style" else (0.2, 0.95)
     ref_strength = round(max(lo, min(hi, ref_strength)), 2)
+    user_style = None
+    us = raw.get("user_style")
+    if us:
+        meta = mystyles.get(str(us))
+        if not meta or not meta.get("ready"):
+            raise ValueError("That style isn't available anymore.")
+        user_style = meta["id"]
+        try:
+            us_strength = float(raw.get("user_style_strength", 0.8))
+        except (TypeError, ValueError):
+            us_strength = 0.8
+        us_strength = round(max(0.1, min(1.5, us_strength)), 2)
     full_prompt = m.prompt_prefix + styles.apply_style(prompt, style) + m.prompt_suffix
+    if user_style:
+        trig = mystyles.get(user_style).get("trigger") or ""
+        if trig:
+            full_prompt = f"{full_prompt}, {trig}"
     negative = ", ".join(x for x in [user_neg, m.negative] if x)
     negative = safety.build_negative(negative, safe_mode)
     return {"prompt": prompt, "full_prompt": full_prompt, "negative": negative, "user_negative": user_neg,
             "model": m.id, "aspect": aspect, "width": w, "height": h, "quality": quality,
             "steps": int(m.steps[quality]), "guidance": float(m.guidance), "style": style,
             "count": count, "seed": seed, "safe_mode": safe_mode,
-            "ref_path": ref_path, "ref_mode": ref_mode, "ref_strength": ref_strength}
+            "ref_path": ref_path, "ref_mode": ref_mode, "ref_strength": ref_strength,
+            "user_style": user_style, "user_style_strength": us_strength if user_style else None}
 
 
 class Generator:
@@ -175,7 +217,7 @@ class Generator:
                 cfg, use_karras_sigmas=True, algorithm_type="dpmsolver++")
 
     def load_pipeline(self, source: str, fp16_files: bool, scheduler: str = "dpmpp_2m_karras",
-                      force_offload: bool = False):
+                      force_offload: bool = False, light_vae: bool = True):
         """Load a model folder (or a Hugging Face name, used by the build tests)."""
         import os
 
@@ -196,7 +238,7 @@ class Generator:
         # lighter picture-finisher from the Speed pack: works in half precision -> half the memory
         self.light_vae = False
         vae_dir = models.model_dir("speed") / "vae"
-        if models.is_ready("speed") and (vae_dir / "config.json").exists():
+        if light_vae and models.is_ready("speed") and (vae_dir / "config.json").exists():
             try:
                 kw["vae"] = AutoencoderKL.from_pretrained(str(vae_dir), torch_dtype=dtype)
                 self.light_vae = True
@@ -245,14 +287,18 @@ class Generator:
         if self.pipe is not None and self.loaded_model == model_id and not force_offload:
             return
         m = models.get(model_id)
-        if not models.is_ready(model_id):
+        test_source = os.environ.get("AISTUDIO_TEST_SOURCE")      # build tests: a tiny stand-in model
+        if not test_source and not models.is_ready(model_id):
             raise RuntimeError(f"The {m.name} model isn't downloaded yet. Download it in the Models tab.")
         job.state, job.message = "loading", f"Loading {m.name} into your graphics card (takes ~30 s the first time)..."
         self._unload()
         info = models.ready_info(model_id)
         t0 = time.time()
-        self.pipe = self.load_pipeline(str(models.model_dir(model_id)), bool(info.get("fp16")),
-                                       m.scheduler, force_offload=force_offload)
+        if test_source:
+            self.pipe = self.load_pipeline(test_source, False, m.scheduler, light_vae=False)
+        else:
+            self.pipe = self.load_pipeline(str(models.model_dir(model_id)), bool(info.get("fp16")),
+                                           m.scheduler, force_offload=force_offload)
         self.loaded_model = model_id
         log.info("loaded %s in %.1fs", model_id, time.time() - t0)
 
@@ -384,13 +430,18 @@ class Generator:
             from PIL import Image
             ref = Image.open(p["ref_path"]).convert("RGB")
 
-        # Turbo (Speed pack) or normal
+        # extra skills: Turbo (Speed pack) and/or one of your own styles
+        wanted = {}
         if p["quality"] == "turbo":
             if not models.is_ready("speed"):
                 raise RuntimeError("Turbo needs the Speed pack add-on (Models tab).")
-            self._set_loras({"turbo": (models.model_dir("speed") / "Hyper-SDXL-8steps-CFG-lora.safetensors", 1.0)})
-        else:
-            self._set_loras({})
+            wanted["turbo"] = (models.model_dir("speed") / "Hyper-SDXL-8steps-CFG-lora.safetensors", 1.0)
+        if p.get("user_style"):
+            f = mystyles.weights_file(p["user_style"])
+            if not f.exists():
+                raise RuntimeError("That style's file is missing - it may have been deleted.")
+            wanted["u" + p["user_style"]] = (f, p["user_style_strength"])
+        self._set_loras(wanted)
 
         if mode == "style":
             job.message = "Getting the style copier ready..."
@@ -437,6 +488,7 @@ class Generator:
             if job.cancel:
                 break
             job.image_index, job.step = i, 0
+            job.preview, job.preview_n = None, job.preview_n + 1
             seed = (p["seed"] + i) % (2**31)
             job.message = f"Drawing picture {i + 1} of {p['count']}..."
             marks = {}
@@ -444,6 +496,15 @@ class Generator:
             def on_step(pipe_, step, _t, kw):
                 job.step = step + 1
                 marks["last_step"] = time.time()
+                lat = kw.get("latents")
+                if lat is not None:
+                    try:
+                        job.preview = latent_preview(lat)
+                        job.preview_n += 1
+                    except Exception:
+                        pass
+                if job.step >= job.steps:
+                    job.message = f"Finishing picture {i + 1} of {p['count']}..."
                 if job.cancel:
                     pipe_._interrupt = True
                 return kw
@@ -473,7 +534,8 @@ class Generator:
                      "style": p["style"], "aspect": p["aspect"], "quality": p["quality"], "seed": seed,
                      "width": p["width"], "height": p["height"], "steps": job.steps,
                      "seconds": round(took, 1), "time": time.time(),
-                     "ref_mode": p.get("ref_mode"), "ref_strength": p.get("ref_strength")}
+                     "ref_mode": p.get("ref_mode"), "ref_strength": p.get("ref_strength"),
+                     "user_style": p.get("user_style"), "user_style_strength": p.get("user_style_strength")}
             gallery.add(entry)
             job.images.append(entry)
             log.info("made %s in %.1fs [%s, %s, %d steps: drawing %.1fs = %.2f steps/s, finishing %.1fs, "

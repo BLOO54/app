@@ -18,7 +18,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import APP_NAME, APP_VERSION, engine_setup, gallery, models, paths, settings, styles, updater
+from . import APP_NAME, APP_VERSION, engine_setup, gallery, models, mystyles, paths, settings, styles, updater
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class App:
         self.update = {"checking": False, "available": None, "error": None, "downloading": False,
                        "progress": 0.0, "checked": False}
         self.shutdown_cb = None
+        from .trainer import Trainer
+        self.trainer = Trainer(lambda: self.generator)
         threading.Thread(target=self._detect_gpu, daemon=True).start()
 
     def _detect_gpu(self):
@@ -78,6 +80,8 @@ class App:
                         "aspects": {k: f"{v[0]} ({v[1]}x{v[2]})" for k, v in styles.ASPECTS.items()},
                         "quality": styles.QUALITY},
             "update": dict(self.update),
+            "styles": mystyles.all_styles(),
+            "training": self.trainer.status(),
             "pictures_folder": str(paths.pictures_dir()),
         }
 
@@ -85,7 +89,7 @@ class App:
         gen = self._generator
         if gen and gen.busy():
             return True
-        if self.engine.status()["active"] or self.update["downloading"]:
+        if self.engine.status()["active"] or self.update["downloading"] or self.trainer.status().get("active"):
             return True
         return any(self.downloads.status(i).get("active") for i in models.all_ids())
 
@@ -172,6 +176,54 @@ def save_reference(data_url: str) -> str:
     return str(target)
 
 
+def _decode_picture(data_url: str):
+    from PIL import Image
+    import io
+    if not isinstance(data_url, str) or "," not in data_url:
+        raise ValueError("A picture couldn't be read.")
+    raw = base64.b64decode(data_url.split(",", 1)[1], validate=False)
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except Exception as e:
+        raise ValueError("One of the files isn't a picture the app can read (try PNG or JPG).") from e
+    return img.convert("RGB")
+
+
+def create_training_style(name: str, images: list) -> str:
+    """Save the pictures for a new style and return its id."""
+    if not isinstance(images, list) or len(images) < 3:
+        raise ValueError("Add at least 3 pictures (10-30 works best).")
+    if len(images) > 60:
+        raise ValueError("That's a lot of pictures - please use 60 or fewer.")
+    sid = mystyles.new_id()
+    folder = mystyles.folder(sid)
+    (folder / "train").mkdir(parents=True, exist_ok=True)
+    try:
+        for i, data in enumerate(images):
+            img = _decode_picture(data)
+            img.thumbnail((1536, 1536))
+            img.save(folder / "train" / f"{i:03d}.png")
+            if i == 0:
+                from PIL import ImageOps
+                ImageOps.fit(img, (256, 256)).save(folder / "thumb.jpg", quality=88)
+    except Exception:
+        mystyles.delete(sid)
+        raise
+    name = (name or "").strip()[:40] or "My style"
+    mystyles.save_meta(sid, mystyles.new_meta(sid, name, "trained", mystyles.make_trigger(name),
+                                              pictures=len(images)))
+    return sid
+
+
+def is_safetensors(head: bytes) -> bool:
+    import struct
+    if len(head) < 10:
+        return False
+    n = struct.unpack("<Q", head[:8])[0]
+    return 2 <= n < 100_000_000 and head[8:9] == b"{"
+
+
 def open_folder(path) -> None:
     try:
         if sys.platform == "win32":
@@ -226,6 +278,34 @@ def make_handler(app: App):
                 return True
             return urllib.parse.urlparse(origin).hostname in ("127.0.0.1", "localhost")
 
+        def _import_style(self, url):
+            """Raw upload of a .safetensors style pack (LoRA) file."""
+            q = urllib.parse.parse_qs(url.query)
+            n = int(self.headers.get("Content-Length") or 0)
+            if n <= 0 or n > 2_000_000_000:
+                return self._json({"error": "That file is empty or too big."}, 400)
+            sid = mystyles.new_id()
+            folder = mystyles.folder(sid)
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / mystyles.WEIGHTS
+            left, head = n, b""
+            with open(target, "wb") as fh:
+                while left > 0:
+                    chunk = self.rfile.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    if len(head) < 16:
+                        head += chunk[:16]
+                    fh.write(chunk)
+                    left -= len(chunk)
+            if left > 0 or not is_safetensors(head):
+                mystyles.delete(sid)
+                return self._json({"error": "That isn't a .safetensors style pack file."}, 400)
+            name = (q.get("name") or ["Imported style"])[0]
+            trigger = (q.get("trigger") or [""])[0]
+            mystyles.save_meta(sid, mystyles.new_meta(sid, name, "imported", trigger))
+            return self._json({"ok": True, "id": sid})
+
         # -------------------------------------------------------- GET
         def do_GET(self):
             if not self._same_origin():
@@ -240,10 +320,22 @@ def make_handler(app: App):
                 return self._json(app.status())
             if route == "/api/gallery":
                 return self._json({"items": gallery.items()})
+            if route.startswith("/api/job/") and route.endswith("/preview.jpg"):
+                gen = app._generator
+                job = gen.get(route.split("/")[3]) if gen else None
+                if job and job.preview:
+                    return self._send(200, job.preview, "image/jpeg")
+                return self._send(404, b"no preview yet", "text/plain")
             if route.startswith("/api/job/"):
                 gen = app._generator
                 job = gen.get(route.rsplit("/", 1)[1]) if gen else None
                 return self._json(job.public() if job else {"state": "missing"}, 200 if job else 404)
+            if route.startswith("/styles/") and route.endswith("/thumb.jpg"):
+                sid = mystyles.safe_id(route.split("/")[2])
+                f = mystyles.root() / sid / "thumb.jpg" if sid else None
+                if f and f.is_file():
+                    return self._send(200, f.read_bytes(), "image/jpeg")
+                return self._send(404, b"not found", "text/plain")
             if route.startswith("/images/"):
                 name = gallery.safe_name(urllib.parse.unquote(route[len("/images/"):]))
                 p = paths.pictures_dir() / name if name else None
@@ -259,7 +351,10 @@ def make_handler(app: App):
         def do_POST(self):
             if not self._same_origin():
                 return self._send(403, b"forbidden", "text/plain")
-            route = urllib.parse.urlparse(self.path).path
+            url = urllib.parse.urlparse(self.path)
+            route = url.path
+            if route == "/api/styles/import":
+                return self._import_style(url)
             body = self._body()
             if route == "/api/ping":
                 app.last_ping = time.time()
@@ -303,6 +398,9 @@ def make_handler(app: App):
                     return self._json({"error": str(e)}, 400)
                 if not engine_setup.is_installed():
                     return self._json({"error": "Install the AI engine first (Setup tab)."}, 400)
+                if app.trainer.status().get("active"):
+                    return self._json({"error": "A style is training right now - wait until it's done "
+                                                "(or stop it in the Train tab)."}, 400)
                 if params["quality"] == "turbo" and not models.is_ready("speed"):
                     return self._json({"error": "Turbo needs the Speed pack add-on (about 1.1 GB). "
                                                 "Download it in the Models tab."}, 400)
@@ -319,6 +417,39 @@ def make_handler(app: App):
                 if gen:
                     gen.cancel(str(body.get("id") or ""))
                 return self._json({"ok": True})
+            if route == "/api/train/start":
+                if app.trainer.status().get("active"):
+                    return self._json({"error": "A style is already training."}, 400)
+                gen = app._generator
+                if gen and gen.busy():
+                    return self._json({"error": "Wait until the pictures are finished."}, 400)
+                if not engine_setup.is_installed():
+                    return self._json({"error": "Install the AI engine first (Setup tab)."}, 400)
+                base = str(body.get("model") or "juggernaut")
+                if base not in {m.id for m in models.CATALOG} or not models.is_ready(base):
+                    return self._json({"error": "Download that model first (Models tab)."}, 400)
+                try:
+                    engine_setup.ensure_packages(["peft"])
+                    sid = create_training_style(str(body.get("name") or ""), body.get("images"))
+                except (ValueError, RuntimeError) as e:
+                    return self._json({"error": str(e)}, 400)
+                app.trainer.start(sid, base, str(body.get("length") or "normal"))
+                return self._json({"ok": True, "id": sid})
+            if route == "/api/train/cancel":
+                app.trainer.cancel()
+                return self._json({"ok": True})
+            if route == "/api/styles/delete":
+                tr = app.trainer.status()
+                if tr.get("active") and tr.get("style_id") == body.get("id"):
+                    return self._json({"error": "Stop the training first."}, 400)
+                gen = app._generator
+                if gen and gen.busy():
+                    return self._json({"error": "Wait until the pictures are finished."}, 400)
+                if gen and ("u" + str(body.get("id"))) in gen.loras:
+                    gen.unload()
+                return self._json({"ok": mystyles.delete(str(body.get("id") or ""))})
+            if route == "/api/styles/rename":
+                return self._json({"ok": mystyles.rename(str(body.get("id") or ""), str(body.get("name") or ""))})
             if route == "/api/clear-history":
                 gen = app._generator
                 if gen and gen.busy():

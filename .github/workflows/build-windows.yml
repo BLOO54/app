@@ -117,6 +117,38 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "drawing test failed" }
           if (-not (Test-Path ci-test-picture.png)) { throw "no picture was made" }
 
+      - name: Train a style for a few rounds on a tiny test model, then draw with it
+        timeout-minutes: 15
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          Push-Location "$dir\app"
+          & "$dir\python\python.exe" -m aistudio --train-test "$env:GITHUB_WORKSPACE\ci-train.json" 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\ci-train.txt"
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 60; throw "training test failed" }
+          Get-Content ci-train.json
+
+      - name: Quick drawing check with a tiny test model - normal, remix, live preview, normal again
+        timeout-minutes: 15
+        env:
+          AISTUDIO_TEST_SOURCE: hf-internal-testing/tiny-stable-diffusion-xl-pipe
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $ref = "$PWD\ci-reference-small.png"
+          & "$dir\python\python.exe" -c "from PIL import Image; Image.new('RGB',(200,150),(200,60,20)).save(r'$ref')"
+          $spec = @(
+            @{ name = "normal"; prompt = "a red apple"; test_size = 64; test_steps = 3 },
+            @{ name = "remix";  prompt = "a blue apple"; ref_file = $ref; ref_mode = "remix"; ref_strength = 0.7; test_size = 64; test_steps = 4 },
+            @{ name = "normal-again"; prompt = "a car"; test_size = 64; test_steps = 3; count = 2 }
+          ) | ConvertTo-Json
+          Set-Content -Path ci-quick-jobs.json -Value $spec -Encoding utf8
+          Push-Location "$dir\app"
+          & "$dir\python\python.exe" -m aistudio --job-test "$env:GITHUB_WORKSPACE\ci-quick-jobs.json" "$env:GITHUB_WORKSPACE\ci-quick-report.json"
+          $code = $LASTEXITCODE
+          Pop-Location
+          Get-Content ci-quick-report.json
+          if ($code -ne 0) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 60; throw "quick drawing check failed" }
+
       - name: Download the real Juggernaut XL model, started the same way as the desktop shortcut (no console)
         timeout-minutes: 20
         run: |
@@ -232,6 +264,7 @@ jobs:
             ci-picture-*.png
             ci-reference.png
             ci-job-report.json
+            ci-train.json
             ci-download*.json
             window.png
             app.log

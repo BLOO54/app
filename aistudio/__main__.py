@@ -138,7 +138,7 @@ def gen_test(model: str, out: str, steps: int) -> int:
     g = Generator.__new__(Generator)   # no worker thread needed
     g.offload, g.gpu = False, ""
     t0 = time.time()
-    pipe = g.load_pipeline(model, fp16_files=False)
+    pipe = g.load_pipeline(model, fp16_files=False, light_vae=False)
     for sched in ("euler_a", "dpmpp_2m_karras"):
         g._set_scheduler(pipe, sched)
         img = pipe(prompt="a red apple on a table", negative_prompt="blurry",
@@ -197,15 +197,54 @@ def job_test(spec_file: str, report: str) -> int:
             time.sleep(1)
         r = {"name": spec.get("name"), "state": job.state, "error": job.error,
              "images": [i["file"] for i in job.images], "seconds": round(time.time() - t0, 1),
-             "style_copier_loaded": g.ip_loaded}
+             "style_copier_loaded": g.ip_loaded, "live_preview_bytes": len(job.preview or b"")}
         if job.images:
             r["picture"] = str(paths.pictures_dir() / job.images[0]["file"])
-        ok = ok and job.state == "done" and len(job.images) == params["count"]
+        ok = ok and job.state == "done" and len(job.images) == params["count"] and bool(job.preview)
         results.append(r)
         print(json.dumps(r), flush=True)
     with open(report, "w", encoding="utf-8") as fh:
         json.dump({"ok": ok, "jobs": results}, fh, indent=2)
     return 0 if ok else 1
+
+
+TINY = "hf-internal-testing/tiny-stable-diffusion-xl-pipe"
+
+
+def train_test(report: str) -> int:
+    """Train a style for a few rounds on a tiny test model, then draw with it (used by the build machine)."""
+    import torch
+    from PIL import Image, ImageDraw
+    from . import engine_setup, mystyles, trainer
+    from .generator import Generator
+    t0 = time.time()
+    engine_setup.ensure_packages(["peft"])
+    sid = mystyles.new_id()
+    folder = mystyles.folder(sid)
+    (folder / "train").mkdir(parents=True)
+    for i in range(4):
+        im = Image.new("RGB", (96, 96), (30 * i, 120, 200 - 30 * i))
+        ImageDraw.Draw(im).rectangle((10 + i * 5, 10, 60, 80), fill=(250, 200, 20))
+        im.save(folder / "train" / f"{i:03d}.png")
+    mystyles.save_meta(sid, mystyles.new_meta(sid, "Test Stripes", "trained", mystyles.make_trigger("Test Stripes")))
+    tr = trainer.Trainer(lambda: None)
+    tr.state = {"active": True, "steps": 4, "cancel": False}
+    trainer.train_style(sid, "juggernaut", tr, source=TINY, resolution=64)
+    meta = mystyles.get(sid)
+    assert meta["ready"], "no style file was saved"
+    g = Generator.__new__(Generator)
+    pipe = g.load_pipeline(TINY, fp16_files=False, light_vae=False)
+    pipe.load_lora_weights(str(mystyles.weights_file(sid)), adapter_name="u" + sid)
+    pipe.set_adapters(["u" + sid], [0.8])
+    img = pipe(prompt="a house, " + meta["trigger"], num_inference_steps=2,
+               generator=torch.Generator("cpu").manual_seed(1)).images[0]
+    result = {"ok": True, "trigger": meta["trigger"], "style_file_bytes": mystyles.weights_file(sid).stat().st_size,
+              "picture_size": list(img.size), "seconds": round(time.time() - t0, 1), "loss": tr.status().get("loss")}
+    mystyles.delete(sid)
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2)
+    print(json.dumps(result))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -218,6 +257,7 @@ def main(argv=None) -> int:
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--download-test", nargs=2, metavar=("MODEL_ID", "REPORT"))
     ap.add_argument("--job-test", nargs=2, metavar=("SPEC_JSON", "REPORT"))
+    ap.add_argument("--train-test", metavar="REPORT")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args(argv)
@@ -235,6 +275,8 @@ def main(argv=None) -> int:
         return self_test(args.self_test)
     if args.install_engine:
         return install_engine(args.cpu)
+    if args.train_test:
+        return train_test(args.train_test)
     if args.job_test:
         return job_test(*args.job_test)
     if args.download_test:

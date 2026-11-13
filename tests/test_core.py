@@ -247,6 +247,68 @@ def test_clear_history(server):
     assert gallery.items() == []
 
 
+def _png_url(color=(200, 10, 10), size=(40, 30)):
+    import base64
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_mystyles_basics():
+    from aistudio import mystyles
+    assert mystyles.make_trigger("My Roblox Art!") == "myrobloxart_style"
+    assert mystyles.make_trigger("") == "mystyle_style"
+    assert mystyles.safe_id("../../x") is None and mystyles.safe_id("abc123def456")
+    sid = mystyles.new_id()
+    mystyles.save_meta(sid, mystyles.new_meta(sid, "Test", "trained", "test_style"))
+    m = mystyles.get(sid)
+    assert m["name"] == "Test" and not m["ready"]
+    mystyles.weights_file(sid).write_bytes(b"x")
+    assert mystyles.get(sid)["ready"]
+    assert mystyles.rename(sid, "Renamed") and mystyles.get(sid)["name"] == "Renamed"
+    assert any(x["id"] == sid for x in mystyles.all_styles())
+    assert mystyles.delete(sid) and mystyles.get(sid) is None
+
+
+def test_create_training_style():
+    from aistudio import mystyles
+    from aistudio.server import create_training_style
+    with pytest.raises(ValueError):
+        create_training_style("x", [_png_url()])
+    sid = create_training_style("Cool Style", [_png_url((i * 40, 0, 0), (300, 200)) for i in range(4)])
+    m = mystyles.get(sid)
+    assert m["trigger"] == "coolstyle_style" and m["pictures"] == 4 and m["has_thumb"]
+    assert len(list((mystyles.folder(sid) / "train").glob("*.png"))) == 4
+    mystyles.delete(sid)
+
+
+def test_import_style_and_use(server):
+    import struct
+    from aistudio import mystyles
+    header = b'{"__metadata__":{}}'
+    good = struct.pack("<Q", len(header)) + header
+    req = urllib.request.Request(server + "/api/styles/import?name=Low%20poly&trigger=lowpoly", data=good,
+                                 method="POST", headers={"Content-Type": "application/octet-stream"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        sid = json.loads(r.read())["id"]
+    m = mystyles.get(sid)
+    assert m["ready"] and m["name"] == "Low poly" and m["trigger"] == "lowpoly" and m["kind"] == "imported"
+    p = make_job_params({"prompt": "a car", "user_style": sid, "user_style_strength": 9})
+    assert p["user_style"] == sid and p["user_style_strength"] == 1.5 and p["full_prompt"].endswith(", lowpoly")
+    with pytest.raises(ValueError):
+        make_job_params({"prompt": "a car", "user_style": "doesnotexist1"})
+    bad = urllib.request.Request(server + "/api/styles/import?name=x", data=b"not a safetensors file at all",
+                                 method="POST", headers={"Content-Type": "application/octet-stream"})
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.urlopen(bad, timeout=10)
+    code, d = _post(server + "/api/styles/delete", {"id": sid})
+    assert code == 200 and mystyles.get(sid) is None
+    code, d = _get(server + "/api/status")
+    assert "training" in json.loads(d) and "styles" in json.loads(d)
+
+
 def test_server_image_path_traversal(server):
     with pytest.raises(urllib.error.HTTPError):
         _get(server + "/images/..%2F..%2Fsettings.json")
