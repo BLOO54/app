@@ -24,10 +24,19 @@ from logging.handlers import RotatingFileHandler
 from . import APP_NAME, APP_VERSION, PORT, paths
 
 
+def fix_missing_console():
+    """When started without a console window (pythonw), print() and progress bars have
+    nowhere to write and crash with "'NoneType' object has no attribute 'write'".
+    Give them a do-nothing place to write instead."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
 def setup_logging():
-    handlers = [RotatingFileHandler(paths.log_file(), maxBytes=1_000_000, backupCount=2, encoding="utf-8")]
-    if sys.stdout is not None and sys.stderr is not None:
-        handlers.append(logging.StreamHandler())
+    handlers = [RotatingFileHandler(paths.log_file(), maxBytes=1_000_000, backupCount=2, encoding="utf-8"),
+                logging.StreamHandler()]
     logging.basicConfig(level=logging.INFO, handlers=handlers,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -146,13 +155,30 @@ def gen_test(model: str, out: str, steps: int) -> int:
     return 0
 
 
+def download_test(model_id: str, report: str) -> int:
+    """Download a model exactly like the Download button does, then write the result to a file."""
+    from . import models
+    d = models.Downloads()
+    d.start(model_id)
+    while d.status(model_id).get("active"):
+        time.sleep(2)
+    st = d.status(model_id)
+    st["ready"] = models.is_ready(model_id)
+    st["info"] = models.ready_info(model_id)
+    with open(report, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=2)
+    return 0 if st["ready"] and not st.get("error") else 1
+
+
 def main(argv=None) -> int:
+    fix_missing_console()
     ap = argparse.ArgumentParser(prog="aistudio")
     ap.add_argument("--self-test", metavar="REPORT")
     ap.add_argument("--install-engine", action="store_true")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--gen-test", nargs=2, metavar=("MODEL", "OUT"))
     ap.add_argument("--steps", type=int, default=4)
+    ap.add_argument("--download-test", nargs=2, metavar=("MODEL_ID", "REPORT"))
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args(argv)
@@ -170,6 +196,8 @@ def main(argv=None) -> int:
         return self_test(args.self_test)
     if args.install_engine:
         return install_engine(args.cpu)
+    if args.download_test:
+        return download_test(*args.download_test)
     if args.gen_test:
         return gen_test(args.gen_test[0], args.gen_test[1], args.steps)
 

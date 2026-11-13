@@ -117,6 +117,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "drawing test failed" }
           if (-not (Test-Path ci-test-picture.png)) { throw "no picture was made" }
 
+      - name: Download the real Juggernaut XL model, started the same way as the desktop shortcut (no console)
+        timeout-minutes: 20
+        run: |
+          $dir = "$env:LOCALAPPDATA\Programs\AI Image Studio"
+          $p = Start-Process "$dir\python\pythonw.exe" -ArgumentList "-m","aistudio","--download-test","juggernaut","$PWD\ci-download.json" -WorkingDirectory "$dir\app" -PassThru
+          if (-not $p.WaitForExit(1100000)) { Stop-Process $p -Force; throw "download took too long" }
+          if (-not (Test-Path ci-download.json)) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "no download report" }
+          Get-Content ci-download.json
+          $r = Get-Content ci-download.json -Raw | ConvertFrom-Json
+          if (-not $r.ready) { Get-Content "$env:LOCALAPPDATA\AIImageStudio\app.log" -Tail 40; throw "model download failed: $($r.error)" }
+          "{0:N2} GB downloaded" -f ($r.done / 1GB)
+          Remove-Item -Recurse -Force "$env:LOCALAPPDATA\AIImageStudio\models\juggernaut"
+
       - name: Picture of the app window
         continue-on-error: true
         run: |

@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 # classic downloads write a growing ".incomplete" file we can measure for the progress bar
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")   # we draw our own progress bar
 
 
 @dataclass
@@ -49,7 +50,7 @@ CATALOG: list[ModelInfo] = [
         steps={"fast": 20, "balanced": 30, "best": 40},
         scheduler="dpmpp_2m_karras",
         negative="blurry, low quality, worst quality, deformed, bad anatomy, extra fingers, watermark, text",
-        approx_gb=6.9,
+        approx_gb=6.5,
     ),
     ModelInfo(
         id="animagine",
@@ -62,7 +63,7 @@ CATALOG: list[ModelInfo] = [
         prompt_suffix=", masterpiece, high score, great score, absurdres",
         negative="lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, cropped, "
                  "worst quality, low quality, low score, bad score, average score, signature, watermark, blurry",
-        approx_gb=6.9,
+        approx_gb=6.5,
     ),
 ]
 
