@@ -11,6 +11,11 @@ from huggingface_hub import HfApi  # noqa: E402
 
 from aistudio import models  # noqa: E402
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:
+    pass
+
 bad = 0
 for m in models.CATALOG:
     try:

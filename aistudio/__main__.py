@@ -156,6 +156,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--port", type=int, default=PORT)
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     setup_logging()
     log = logging.getLogger("aistudio")
